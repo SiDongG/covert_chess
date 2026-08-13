@@ -38,7 +38,7 @@ from arcmark.side_info import SideInfoMode, compute_key_si
 # Configuration
 # ============================================================================
 MODEL_NAMES = [
-    'meta-llama/Llama-3.1-8B-Instruct'
+    'microsoft/phi-4'                    # Phi-4, 14B dense, ungated (MIT)
 ]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 if DEVICE == "cpu":
@@ -1572,18 +1572,15 @@ fig, ax = plt.subplots(figsize=(7, 6))
 im = ax.imshow(B, cmap="viridis", aspect="auto")
 ax.set_xticks(range(len(CONV_ORDER))); ax.set_xticklabels([f"{c}\n(~{CONVERSATIONS[c].max_turn_tokens}tok)"
                                              for c in CONV_ORDER])
-ax.set_yticks(range(3)); ax.set_yticklabels(
+ax.set_yticks(range(len(TASK_ORDER))); ax.set_yticklabels(
     [f"{t}\n(~{b}b)" for t, b in zip(TASK_ORDER, ["2.3", "5", "8.4"])])
 ax.set_xlabel("conversation type (turn length →)")
 ax.set_ylabel("embedding task (coded bits →)")
 ax.set_title("Effective payload bits per emitted token")
-for i in range(3):
-    for j in range(3):
+for i in range(B.shape[0]):          # tasks
+    for j in range(B.shape[1]):      # conversations
         ax.text(j, i, f"{B[i, j]:.3f}", ha="center", va="center",
                 color="white" if B[i, j] < B.max() * 0.6 else "black")
-        if i == j:
-            ax.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
-                                       edgecolor="red", lw=3))
 fig.colorbar(im, ax=ax, label="bits / token")
 plt.tight_layout(); plt.savefig(OUT_PLOT, dpi=140)
 log(f"Wrote {OUT_PLOT}")

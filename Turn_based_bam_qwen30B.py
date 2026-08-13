@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-
 import math
 import os
 import sys
@@ -38,7 +36,7 @@ from arcmark.side_info import SideInfoMode, compute_key_si
 # Configuration
 # ============================================================================
 MODEL_NAMES = [
-    'meta-llama/Llama-3.1-8B-Instruct'
+    'Qwen/Qwen3-30B-A3B-Instruct-2507'   # 30B MoE (3B active), non-thinking
 ]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 if DEVICE == "cpu":
