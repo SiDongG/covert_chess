@@ -48,7 +48,7 @@ if DEVICE == "cpu":
     )
 
 SMOKE_TEST = False
-N_DIALOGUES = 10 if not SMOKE_TEST else 2
+N_DIALOGUES = 100 if not SMOKE_TEST else 2
 ROUNDS_PER_DIALOGUE = 10 if not SMOKE_TEST else 4
 
 # Single BAM operating point.
