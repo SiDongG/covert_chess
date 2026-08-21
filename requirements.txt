@@ -1,0 +1,13 @@
+
+torch>=2.4
+transformers>=4.53
+tokenizers>=0.21
+accelerate>=1.0          
+datasets>=3.0          
+huggingface-hub>=0.30
+safetensors>=0.4
+sentencepiece>=0.2       
+numpy>=1.26,<2
+pandas>=2.0
+matplotlib>=3.7
+chess>=1.11             

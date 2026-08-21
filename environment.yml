@@ -1,0 +1,29 @@
+# Conda alternative to requirements.txt / requirements-lock.txt.
+#
+# Create with:   conda env create -f environment.yml
+# Activate with: conda activate bam-artifact
+#
+# The pip section installs the GPU torch wheel for CUDA 12.1. Adjust the
+# --extra-index-url / version to match your CUDA toolkit if different.
+name: bam-artifact
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.5.1
+      - transformers==4.53.2
+      - tokenizers==0.21.2
+      - accelerate==1.2.1
+      - datasets==3.6.0
+      - huggingface-hub==0.33.0
+      - safetensors==0.4.5
+      - sentencepiece==0.2.0
+      - numpy==1.26.4
+      - pandas==2.2.3
+      - matplotlib==3.9.2
+      - chess==1.11.1
+      # Optional (eval_pipeline.py judge only):
+      # - google-genai==1.9.0
