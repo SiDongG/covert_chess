@@ -27,20 +27,6 @@ boundary so async GPU work is attributed to the right component):
          posterior update (message_likelihood + Bayes step + fresh CDF), and
          the threshold check (trivial).
 
-Efficiency changes vs the previous version:
-  * side-info + permutation are derived ONCE per step and shared between
-    emission and angle read-out (previously computed twice per token);
-  * the posterior CDF is computed once per step and reused by both the
-    encoder's symbol map and the decoder's likelihood (previously two
-    cumsums per token — this halves the O(M) posterior-side cost);
-  * the knockdown multiply is skipped while knockdown is identity (i.e.
-    outside retry episodes, which is almost always);
-  * torch.inference_mode for all LM calls;
-  * gc / cuda.empty_cache every GC_EVERY trials instead of every trial.
-  NOT done: batching multiple trials through the LM in one forward. It would
-  give the largest throughput win but shares one forward across trials with
-  different stopping times, which destroys the per-component / per-token
-  attribution this script exists to measure.
 
 L is sieved to a few representative operating points (edit L_VALUES to
 change). Trials are PAIRED across the three schemes and all L values.
@@ -114,7 +100,6 @@ TORCH_POSTERIOR_MIN_M = 1 << 14
 # frontier (low / mid / high / very-high reliability targets).
 L_VALUES = [4, 64, 2048, 32768] if not SMOKE_TEST else [8]
 
-# ── BAM fixed parameters (as in compare.py) ─────────────────────────────────
 GAMMA      = 0.5     # communication-phase decision threshold g1
 RHO_NACK   = 0.75    # rho_NACK
 EPS_NOISE  = 0.4     # eps      (communication-phase Laplace floor)

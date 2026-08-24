@@ -1,26 +1,6 @@
 """
 compare.py — Burnashev-ArcMark (BAM) vs Fixed-Length ArcMark vs open-source
 multi-bit baselines (MPAC, BiMark, StealthInk) on C4 RealNews.
-
-Changes vs previous revision:
-  * NEW BASELINES: MPAC (Yoo et al., NAACL 2024), BiMark (Feng et al., ICML
-    2025), and StealthInk (Jiang et al., ICML 2025), all run at the same
-    fixed lengths as Fixed-Length ArcMark (FIXED_NS = 20..60), 8-bit payload,
-    C4 prompts, same seeds/prompt pairing. Implementations are vendored
-    verbatim from the official repos under ./baselines/ (see its __init__.py
-    for provenance); each scheme keeps its OWN hashing/decoding machinery.
-  * TIMING: per-trial wall-clock (perf_counter + cuda.synchronize) split into
-    gen_sec (watermarked generation only) and dec_sec (decode only). Reported
-    as sec/token for generation. Teacher-forced PPL scoring and the
-    length-matched base generation are excluded from both. The base
-    generation itself is timed separately (base_sec_tok) as the no-embedding
-    reference. BAM's decode is integrated into its interactive loop, so its
-    dec_sec is 0 by construction (noted in the CSV).
-  * REMOVED: the TF-IDF steganalysis-F1 detector (metric discarded).
-
-Confirmation phase (unchanged): the 1-bit ACK/NACK confirmation is a genuine
-2-symbol ANTIPODAL channel with its own clean 2-hypothesis likelihood and its
-own noise floor EPS_CONF.
 """
 
 from __future__ import annotations
@@ -72,8 +52,8 @@ from baselines.stealthink import (ReweightProcessor as SIReweightProcessor,
 # ============================================================================
 MODEL_NAMES = [
     "unsloth/Meta-Llama-3.1-8B",
-    #"unsloth/Qwen3.5-9B-Base",
-    #"unsloth/mistral-7b-v0.3"
+    "unsloth/Qwen3.5-9B-Base",
+    "unsloth/mistral-7b-v0.3"
 ]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -893,9 +873,6 @@ def mpac_trial(prompt_ids, payload_int, n_tokens):
     gen_ids = output[0, len(prompt_ids):].detach().cpu().tolist()
     positions = proc.flush_position()[0]   # gold bit positions (metric only)
 
-    # PPL reference matches ArcMark/BAM: top-k-truncated base distribution.
-    # MPAC generates with top_k=0 (full biased dist), but perplexity is scored
-    # on the same top-k reference so the PPL comparison across schemes is fair.
     base_logps = score_tokens_teacher_forced(prompt_ids, gen_ids, top_k=TOP_K)
 
     detector = MpacDetector(
@@ -1031,9 +1008,6 @@ def stealthink_trial(prompt_ids, payload_int, n_tokens, trial_seed):
         )
     gen_ids = seq[0, len(prompt_ids):].detach().cpu().tolist()
 
-    # PPL reference matches ArcMark/BAM: top-k-truncated base distribution.
-    # StealthInk generates with top_k=0 (full reweighted dist), but perplexity
-    # is scored on the same top-k reference for a fair cross-scheme comparison.
     base_logps = score_tokens_teacher_forced(prompt_ids, gen_ids, top_k=TOP_K)
 
     with WallTimer() as tim_dec:

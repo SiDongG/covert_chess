@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-File 2 of 2 — blind, judge, and score in one run.
-
 Takes transcripts_chess.json (from generate_transcripts.py) and:
   1. BLINDS it into an A/B preference set (neutral speaker names, no labels,
      watermarked side randomized per item, item order shuffled). Writes

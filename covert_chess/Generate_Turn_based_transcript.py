@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-File 1 of 2 — generate paired watermarked/clean transcripts.
-
 Runs the BAM dialogue driver defined in Turn_based_bam_RandomTopic.py over the
 CHESS embedding task and the two conversation settings (chat, debate).
 For each of N pairs per setting it produces:
@@ -9,8 +7,6 @@ For each of N pairs per setting it produces:
   * a clean dialogue (identical topic/opener seed + identical RNG seed, ordinary
     sampling, no payload).
 
-The pairing is the whole point: pair i in both sets uses the SAME seed, so a
-judge comparing them sees the effect of watermarking, not of topic drift.
 
 Output: transcripts_chess.json
   {"meta": {...},
@@ -26,12 +22,6 @@ Usage:
     OUT=foo.json python generate_transcripts.py
     MAIN_SCRIPT=/path/to/Turn_based_bam_RandomTopic.py python generate_transcripts.py
 
-Why we exec-load instead of import:
-    Turn_based_bam_Qwen3_30B.py (and the Llama variant) runs the full task x
-    conversation experiment matrix at module level (no __main__ guard). A plain `import` would launch the whole GPU run.
-    We instead compile the source only up to the run section, which gives us the
-    profiles, seed banks, task generators, LMContext and dialogue drivers with
-    byte-identical behaviour, without executing the experiment.
 """
 from __future__ import annotations
 

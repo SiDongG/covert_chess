@@ -2,43 +2,6 @@
 kl_security_c4.py — Information-theoretic security (Cachin 2000) of ArcMark's
 optimal-transport emission, measured on C4 RealNews + Llama-3.1-8B.
 
-CORRECTED QUANTITY (seed-marginalized, at fixed context)
---------------------------------------------------------
-The Cachin security quantity is, at each position t with the FULL context held
-fixed:
-
-        D( E_{k}[ W(x | u, k, s) ]  ||  W(x | s) )
-
-where s is the STATE (the base LM top-k distribution Ptilde_t, a deterministic
-function of the fixed context) and the expectation is over the KEY prior.
-
-The key at a position is k = (s_index, pi) = f(Seed, x_{t-h:t-1}). With the
-context fixed, the ONLY randomness in k is the shared secret Seed. Drawing Seed
-uniformly therefore INDUCES the key prior. So we marginalize over SEEDS:
-
-    Qhat_t(x) = (1/Nseed) * sum_{j=1}^{Nseed} cond_{ s(Seed_j) }( x ; pi(Seed_j) )
-
-CRUCIAL: each Seed_j yields a DIFFERENT permutation pi(Seed_j), hence a DIFFERENT
-OT problem (different cost matrix) and a DIFFERENT coupling. We then extract the
-SINGLE row at that seed's realized s_index. This is NOT the average of the R rows
-of one coupling — that average is identically Ptilde_t by the OT column-marginal
-constraint (KL == 0, uninformative). Averaging over seeds has no such identity,
-so D(Qhat_t || Ptilde_t) is genuinely nonzero and IS the Cachin overhead induced
-by the (deterministic, context-keyed) key mechanism.
-
-The symbol u is NOT a function of the seed (it comes from the message/BAM belief),
-so at a fixed position u is held fixed at a representative value and only
-(s_index, pi) are marginalized over seeds — matching E_k[ W(x|u,k,s) ].
-
-KL is computed TOP-k vs TOP-k (both restricted to the OT top-k support and
-renormalized), so any nonzero value is pure key-marginal distortion, not the
-top-k truncation gap.
-
-Sequence generation: at each step we emit ONE token using a fixed operational
-seed (SHARED_SEED) so the trajectory is a valid watermarked sequence and the
-context distribution is realistic; the KL at that step is computed by
-marginalizing over Nseed FRESH uniform seeds at the same fixed context.
-
 Sweep:
   R     (OT key cardinality / rotation slices) in {4, 8, 16}
   Nseed (Monte-Carlo seed count)               — a few values, to show convergence

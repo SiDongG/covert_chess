@@ -61,7 +61,6 @@ if ARCMARK_SRC not in sys.path:
 from arcmark.config import ArcMarkConfig
 from arcmark.sinkhorn import extract_conditional, solve_arcmark_ot
 from arcmark.side_info import SideInfoMode, compute_key_si
-# Fixed-length ArcMark baseline (Scheme 4), ported from compare.py.
 from arcmark.coding import RandomLinearCode
 from arcmark.processor import ArcMarkLogitsProcessor
 from arcmark.message_decoder import decode_with_code, decode_message
@@ -101,7 +100,6 @@ FIXED_LENGTHS = [20, 30, 40, 50, 60] if not SMOKE_TEST else [20]
 # the two fixed-length curves are directly comparable at each token count.
 FL_LENGTHS = FIXED_LENGTHS
 
-# ── BAM fixed parameters (as in compare.py) ─────────────────────────────────
 GAMMA      = 0.5     # communication-phase decision threshold g1 (BAM only)
 RHO_NACK   = 0.75    # rho_NACK (BAM only)
 EPS_NOISE  = 0.4     # eps      (communication-phase Laplace floor)
@@ -407,12 +405,7 @@ def run_comm_step(pi, m_true, emitted, lm: "IncrementalLM"):
 # ============================================================================
 # BAM confirmation phase — Algorithm 1 (posterior matching) at p = 2
 # ============================================================================
-# Faithful to the paper (and matching compare.py): confirmation is the SAME
-# posterior-matching machinery run with alphabet size p = 2, over the antipodal
-# symbols u_ACK = 0 (angle 0) and u_NACK = 1 (angle pi at p = 2). Belief rho is
-# updated with the SAME contaminated-Laplace likelihood evaluated at p = 2,
-# with its own contamination floor eps_ACK (EPS_CONF) and its own Laplace scale
-# b = pi/(p*sqrt(2)) at p = 2 (independent of the comm-phase p = 4 scale).
+
 P_CONF = 2                       # confirmation alphabet size (paper: p = 2)
 SYM_ACK  = 0                     # u_ACK  -> angle 0
 SYM_NACK = 1                     # u_NACK -> angle pi at p = 2
@@ -898,7 +891,6 @@ log(f"\nWrote {OUT_CSV}")
 # ============================================================================
 # Frontier plot — 4 curves per model (8-bit), stacked linear/semilog panels.
 # Merged from plot_ablation.py. The 4th curve (fixed-length ArcMark, kind="FL")
-# is now READ FROM THE CSV computed above — no longer hardcoded.
 # ============================================================================
 OUT_FRONTIER_PNG = "ablation_confirmation_frontier.png"
 OUT_FRONTIER_PDF = "ablation_confirmation_frontier.pdf"
