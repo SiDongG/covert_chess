@@ -69,6 +69,8 @@ BAM_G1   = 0.5
 BAM_G2   = 0.9999999
 BAM_RACK = 0.984375
 BAM_RNACK = 0.75
+# Note that in the actual script, G2 and BAM_RACK are inert, meaning they don't actually affect 
+# the algorithm, BAM_RACK is superceded by SPILL_BELIEF_THR = 0.75 
 
 MAX_CONF_STEPS  = 80
 MIN_COMM_TOKENS = 0
@@ -1015,7 +1017,7 @@ def run_dialogue(rng, task_gen: TaskGen, profile: ConvProfile, seed=None):
                   if wm_token_count > 0 else float("nan"))
     perplexity_baseline = (math.exp(-bl_logprob_sum / bl_token_count)
                            if bl_token_count > 0 else float("nan"))
-    total_tok = wm_tokens_total + pad_tokens_total
+    total_tok = wm_tokens_total + pad_tokens_total + filler_tokens_total
     bits_per_token = coded_bits_correct / max(total_tok, 1)
     # pad_ratio now counts filler-turn tokens as wasted capacity alongside pad.
     wasted_tokens = pad_tokens_total + filler_tokens_total
@@ -1094,7 +1096,7 @@ def run_cell(task_name, conv_name):
     agg_unf  = sum(d["unfinished"] for d in per_dialogue)
     agg_res  = sum(d["resumes"] for d in per_dialogue)
     agg_fill = sum(d["filler_turns"] for d in per_dialogue)
-    bits_per_token = agg_cbc / max(agg_wm + agg_pad, 1)
+    bits_per_token = agg_cbc / max(agg_wm + agg_pad + agg_fill_tok, 1)
     err_rate = agg_err / max(agg_cor + agg_err, 1)
     # completion rate = fraction of DIALOGUES that are fully clean: every
     # decoded message correct AND no payload left unfinished (a payload can now
