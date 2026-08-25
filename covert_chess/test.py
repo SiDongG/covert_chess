@@ -1,45 +1,38 @@
 #!/usr/bin/env python
 """
-ppl_recheck.py — Recompute ONLY the perplexity column for the questionable
-schemes (MPAC, BiMark, StealthInk) plus the No-Embedding reference.
+ppl_recheck.py (v2) — Recompute ONLY the perplexity column for MPAC, BiMark,
+StealthInk (+ No-Embedding reference), replicating compare.py's trial logic
+VERBATIM — same truncate-first protocol, same full-softmax scoring, same
+seeding — with exactly ONE change:
 
-What it corrects relative to the run that produced the current table:
+    NUCLEUS FIX (MPAC & BiMark only): model.generate() silently merges the
+    hub checkpoint's generation_config with the passed kwargs. Llama-3.1
+    ships top_p=0.9, so a hidden nucleus warper stacked on top of the
+    watermark processors, depressing Llama MPAC/BiMark PPL below the
+    unwatermarked baseline. Fixed by passing top_p=1.0 explicitly and
+    neutralizing the hub generation_config at load. Nothing else differs.
 
-  (1) GENERATION (the actual bug, MPAC & BiMark only): model.generate()
-      silently merges the hub checkpoint's generation_config with the passed
-      kwargs. Llama-3.1 checkpoints ship top_p=0.9, so on Llama a hidden
-      nucleus warper stacked on top of the watermark processors, depressing
-      MPAC/BiMark PPL ~19% below the unwatermarked baseline (impossible for
-      any honest watermark). Fixed here by neutralizing the hub
-      generation_config at load AND passing top_p=1.0 explicitly.
-      StealthInk uses its own sampling loop and never had this problem; it is
-      rerun unchanged as a control and to confirm its column was clean.
+Kept identical to compare.py (do NOT "fix" these):
+  * TopKTruncationProcessor(TOP_K) runs BEFORE the MPAC bias and BEFORE the
+    StealthInk reweighting: every scheme operates on the top-50-renormalized
+    base distribution, the shared support of the whole comparison.
+  * StealthInk path byte-for-byte as compare.py (custom loop, never had the
+    nucleus bug) — it is the control; its numbers should reproduce the table.
+  * Scoring: full softmax for every scheme (compare.py's
+    score_tokens_teacher_forced), no truncated reference, no clamps.
+  * Seeding: payload = i % 256, trial_seed = seed_base + i*10 + n_tok, seed
+    bases 70000/80000/90000.
 
-  (2) SCORING (a landmine in the current compare.py, not in the table run):
-      all schemes are teacher-forced under the base model's FULL softmax —
-      the same reference the base / BAM / ArcMark / BiMark rows already use.
-      No top-k truncation, no 1e-30 clamps.
-
-Also reported per scheme: the fraction of generated tokens falling OUTSIDE
-the base model's top-50 (`oot50`). Expectations:
-  - base:      0 by construction (sampled from top-50)
-  - BiMark:    0 (its processor restricts to the base top-50 internally)
-  - MPAC:      > 0 (full-vocab biased sampling — proves no hidden truncation)
-  - StealthInk:> 0 (full-vocab reweighted sampling, repo default)
-If MPAC/BiMark oot50 or PPL still look truncated on some model, the printed
-`hub generation_config` line for that model tells you what else shipped.
-
-Seeding replicates run_fixed_scheme exactly (payload = i % 256, trial_seed =
-seed_base + i*10 + n_tok, same per-scheme seed bases), so StealthInk's
-generations are bit-identical to the original run; MPAC/BiMark differ only
-through the corrected warper stack.
+Diagnostic column `oot50` = fraction of generated tokens outside the base
+model's top-50 (recomputed in float32). Under the truncate-first protocol it
+should be ~0 for EVERY scheme (a handful of 1e-3 events are fp16-vs-fp32
+rank-50 ties, harmless). If a scheme shows oot50 >> 0, the protocol did not
+replicate — trust that flag over the PPL numbers.
 
 Usage:
-  python ppl_recheck.py                     # all models, 200 trials, n=50
-  PPL_TRIALS=1000 python ppl_recheck.py     # match the paper's trial count
-  PPL_MODELS=llama python ppl_recheck.py    # substring filter on model name
-
-Writes ppl_recheck.csv and prints a summary table.
+  PPL_TRIALS=200 python ppl_recheck.py
+  PPL_MODELS=llama PPL_TRIALS=5 python ppl_recheck.py     # smoke test
+Writes ppl_recheck.csv.
 """
 from __future__ import annotations
 
@@ -66,8 +59,8 @@ from baselines.stealthink import (ReweightProcessor as SIReweightProcessor,
 # ── Config (mirrors compare.py; keep in sync) ───────────────────────────────
 MODEL_NAMES = [
     "unsloth/Meta-Llama-3.1-8B",
-    #"unsloth/Qwen3.5-9B-Base",
-    #"unsloth/mistral-7b-v0.3",
+    "unsloth/Qwen3.5-9B-Base",
+    "unsloth/mistral-7b-v0.3",
 ]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -75,8 +68,7 @@ N_TRIALS  = int(os.environ.get("PPL_TRIALS", "200"))
 MODEL_SUB = os.environ.get("PPL_MODELS", "").lower()   # substring filter
 N_TOK     = 50                                          # the table's row
 K_BITS    = 8
-M_MSG     = 256
-TOP_K     = 50          # base sampler truncation + oot diagnostic threshold
+TOP_K     = 50
 N_PROMPTS = 200
 PROMPT_TOKEN_LEN = 32
 SHARED_SEED = 0x9E3779B97F4A7C15F39CC0605CEDC834
@@ -103,6 +95,29 @@ def log(*a, **kw):
     print(*a, **kw, flush=True)
 
 
+# ── Copied VERBATIM from compare.py ─────────────────────────────────────────
+class TopKTruncationProcessor:
+    """Truncate logits to the top-k BEFORE a downstream watermark processor.
+
+    Placed first in a LogitsProcessorList, this hands the watermark scheme the
+    top-k-renormalized base distribution, so MPAC biases within the same
+    candidate set as the shared top-50 base reference, and StealthInk's
+    unbiasedness guarantee (which holds for any input distribution) becomes
+    "unbiased w.r.t. top-50 sampling" -- matching ArcMark/BiMark's support.
+    NOTE: truncating AFTER the watermark processor would instead re-distort
+    the watermarked distribution, so order matters.
+    """
+
+    def __init__(self, k: int):
+        self.k = k
+
+    def __call__(self, input_ids, scores):
+        if self.k and 0 < self.k < scores.shape[-1]:
+            kth = torch.topk(scores, self.k, dim=-1).values[..., -1, None]
+            return scores.masked_fill(scores < kth, float("-inf"))
+        return scores
+
+
 # ── Model / prompts ─────────────────────────────────────────────────────────
 def load_model(model_name):
     log(f"Loading {model_name} on {DEVICE} ...")
@@ -115,9 +130,8 @@ def load_model(model_name):
     model.eval()
     gcfg = getattr(model, "generation_config", None)
     if gcfg is not None:
-        # THE FIX: hub checkpoints ship sampling defaults that generate()
-        # silently merges with our kwargs (Llama-3.1 ships top_p=0.9). Log
-        # what shipped, then neutralize everything.
+        # NUCLEUS FIX (the only behavioral change vs the table run): log what
+        # the checkpoint shipped, then neutralize every sampling field.
         log(f"  hub generation_config: temperature={gcfg.temperature} "
             f"top_p={gcfg.top_p} top_k={gcfg.top_k} do_sample={gcfg.do_sample}")
         gcfg.max_length = None
@@ -162,7 +176,7 @@ def build_prompt_pool(tokenizer):
     return pool
 
 
-# ── Scoring: FULL softmax + out-of-top-50 diagnostic in one forward pass ────
+# ── Scoring: FULL softmax (compare.py's reference) + oot50 sanity check ─────
 @torch.no_grad()
 def score_full_softmax(model, prompt_ids, gen_ids):
     """Return (per-token full-softmax logps, #tokens outside base top-K)."""
@@ -178,8 +192,7 @@ def score_full_softmax(model, prompt_ids, gen_ids):
     for i, tok in enumerate(gen_ids):
         pos = p_len + i - 1
         logps.append(float(logprobs[pos, tok].item()))
-        topk_idx = torch.topk(logits[pos], TOP_K).indices
-        if tok not in topk_idx:
+        if tok not in torch.topk(logits[pos], TOP_K).indices:
             oot += 1
     return logps, oot
 
@@ -188,15 +201,13 @@ def ppl(logps):
     return math.exp(-sum(logps) / len(logps)) if logps else float("nan")
 
 
-# ── Generations ─────────────────────────────────────────────────────────────
+# ── Generations: VERBATIM compare.py trial logic (+ nucleus fix where noted) ─
 @torch.no_grad()
 def gen_base(model, prompt_ids, n_tokens):
-    """No-embedding reference: top-50 sampling (ArcMark cover), returns ids."""
+    """No-embedding reference: top-50 sampling, exactly baseline_logprobs."""
     ids = torch.tensor(prompt_ids, dtype=torch.long,
                        device=model.device).unsqueeze(0)
-    past = None
-    cur = ids
-    out_ids = []
+    past, cur, out_ids = None, ids, []
     for _ in range(n_tokens):
         out = model(input_ids=cur, past_key_values=past, use_cache=True)
         past = out.past_key_values
@@ -222,13 +233,19 @@ def gen_mpac(model, tokenizer, vocab_size, prompt_ids, payload_int, n_tokens):
     inputs = torch.tensor(prompt_ids, dtype=torch.long,
                           device=model.device).unsqueeze(0)
     output = model.generate(
-        input_ids=inputs, attention_mask=torch.ones_like(inputs),
-        do_sample=True, temperature=1.0,
-        top_k=0,
-        top_p=1.0,               # << the fix: never inherit hub top_p
-        min_new_tokens=n_tokens, max_new_tokens=n_tokens,
-        eos_token_id=None, pad_token_id=tokenizer.pad_token_id,
-        logits_processor=[proc])
+        input_ids=inputs,
+        attention_mask=torch.ones_like(inputs),
+        do_sample=True,
+        temperature=1.0,
+        top_k=0,             # truncation handled by the processor below
+        top_p=1.0,           # << NUCLEUS FIX: never inherit hub top_p
+        min_new_tokens=n_tokens,
+        max_new_tokens=n_tokens,
+        eos_token_id=None,
+        pad_token_id=tokenizer.pad_token_id,
+        # Truncate-first, then bias (verbatim compare.py protocol).
+        logits_processor=[TopKTruncationProcessor(TOP_K), proc],
+    )
     return output[0, len(prompt_ids):].detach().cpu().tolist()
 
 
@@ -243,20 +260,27 @@ def gen_bimark(model, tokenizer, vocab_size, prompt_ids, payload_int, n_tokens):
     inputs = torch.tensor(prompt_ids, dtype=torch.long,
                           device=model.device).unsqueeze(0)
     output = model.generate(
-        input_ids=inputs, attention_mask=torch.ones_like(inputs),
-        do_sample=True, temperature=1.0,
-        top_k=0,
-        top_p=1.0,               # << the fix
-        min_new_tokens=n_tokens, max_new_tokens=n_tokens,
-        eos_token_id=None, pad_token_id=tokenizer.pad_token_id,
-        logits_processor=[proc])
+        input_ids=inputs,
+        attention_mask=torch.ones_like(inputs),
+        do_sample=True,
+        temperature=1.0,
+        top_k=0,             # processor already restricts to its top-50
+        top_p=1.0,           # << NUCLEUS FIX: never inherit hub top_p
+        min_new_tokens=n_tokens,
+        max_new_tokens=n_tokens,
+        eos_token_id=None,
+        pad_token_id=tokenizer.pad_token_id,
+        logits_processor=[proc],
+    )
     return output[0, len(prompt_ids):].detach().cpu().tolist()
 
 
 @torch.no_grad()
 def gen_stealthink(model, tokenizer, vocab_size, prompt_ids, payload_int,
                    n_tokens):
-    """Unchanged from compare.py — custom loop, never touched by the bug."""
+    """VERBATIM compare.py — truncate-first protocol, custom loop, no change.
+    This is the control: it never had the nucleus bug, so its PPL should
+    reproduce the table row."""
     num_value = 2 ** STEALTHINK_CAPACITY
     R = 1.0 / num_value
     converted_msg_length = K_BITS // STEALTHINK_CAPACITY
@@ -273,8 +297,11 @@ def gen_stealthink(model, tokenizer, vocab_size, prompt_ids, payload_int,
                           device=model.device).unsqueeze(0)
     seq = si_generate_exact_n_tokens(
         model=model, tokenizer=tokenizer, inputs=inputs,
-        logits_processor=LogitsProcessorList([lp]),
-        n_new_tokens=n_tokens, do_sample=True, temperature=1.0, top_k=0,
+        # Truncate-first, then reweight (verbatim compare.py protocol).
+        logits_processor=LogitsProcessorList(
+            [TopKTruncationProcessor(TOP_K), lp]),
+        n_new_tokens=n_tokens, do_sample=True, temperature=1.0,
+        top_k=0,             # must remain 0: see compare.py comment
         eos_id=tokenizer.eos_token_id, soft_eos_penalty=0.0)
     return seq[0, len(prompt_ids):].detach().cpu().tolist()
 
@@ -293,7 +320,7 @@ def run_model(model_name, rows):
     pool = build_prompt_pool(tok)
 
     schemes = {
-        "No Embedding": None,   # generated fresh per trial for reference
+        "No Embedding": None,
         "MPAC":       lambda p, m: gen_mpac(model, tok, vocab_size, p, m, N_TOK),
         "BiMark":     lambda p, m: gen_bimark(model, tok, vocab_size, p, m, N_TOK),
         "StealthInk": lambda p, m: gen_stealthink(model, tok, vocab_size, p, m, N_TOK),
@@ -306,7 +333,6 @@ def run_model(model_name, rows):
 
         for name, gen_fn in schemes.items():
             if gen_fn is None:
-                # base reference: one seed convention, reused across schemes
                 np.random.seed(50000 + i * 10 + N_TOK)
                 torch.manual_seed(50000 + i * 10 + N_TOK)
                 gen_ids = gen_base(model, prompt_ids, N_TOK)
@@ -329,7 +355,7 @@ def run_model(model_name, rows):
             torch.cuda.empty_cache()
 
     log(f"\n[{model_name}] PPL recheck (n={N_TOK}, {N_TRIALS} trials, "
-        f"full-softmax reference):")
+        f"truncate-first protocol, full-softmax reference):")
     log(f"  {'scheme':<14} {'PPL mean±SE':>16} {'oot50 rate':>11}")
     for name, r in results.items():
         m, se = mean_se(r["ppl"])
@@ -365,9 +391,9 @@ def main():
                     f"{r['ppl_mean']:.4f},{r['ppl_se']:.4f},"
                     f"{r['oot50_rate']:.6f}\n")
     log(f"\nWrote {OUT_CSV}")
-    log("Expected sanity pattern per model: base=reference; "
-        "StealthInk≈base (distortion-free, oot50>0); "
-        "BiMark≈base, oot50=0; MPAC above base, oot50>0.")
+    log("Sanity: oot50 ~ 0 for ALL schemes (truncate-first protocol; ~1e-3 "
+        "fp16 rank-50 ties are fine). StealthInk should reproduce the table; "
+        "on Llama, MPAC/BiMark should move UP from 6.2 toward/above base.")
 
 
 if __name__ == "__main__":
