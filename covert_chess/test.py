@@ -66,8 +66,8 @@ from baselines.bimark import WatermarkBimark
 # ── Config (mirrors compare.py; keep in sync) ───────────────────────────────
 MODEL_NAMES = [
     "unsloth/Meta-Llama-3.1-8B",
-    "unsloth/Qwen3.5-9B-Base",
-    "unsloth/mistral-7b-v0.3",
+    #"unsloth/Qwen3.5-9B-Base",
+    #"unsloth/mistral-7b-v0.3",
 ]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
