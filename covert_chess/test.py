@@ -73,7 +73,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 N_TRIALS  = int(os.environ.get("PPL_TRIALS", "1000"))
 MODEL_SUB = os.environ.get("PPL_MODELS", "").lower()   # substring filter
-N_TOK     = 50                                          # the table's row
+N_TOK     = [20,30,40,50,60]                                          # the table's row
 K_BITS    = 8
 TOP_K     = 50
 N_PROMPTS = 200
