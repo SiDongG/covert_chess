@@ -39,9 +39,13 @@ seed -> watermarked generation -> teacher-forced full-softmax scoring ->
 length-matched base generation (no reseed; RNG state continues), so each
 scheme row carries its own base columns, as in compare.py.
 
+Block lengths: sweeps FIXED_NS = [20, 30, 40, 50, 60] (compare.py's
+FIXED_NS), one CSV row per (model, scheme, n_tok); trial_seed and payload
+match run_fixed_scheme at every (scheme, n_tok, trial).
+
 Usage:
   python ppl_recheck.py                                   # 1000 trials (default)
-  PPL_MODELS=llama PPL_TRIALS=5 python ppl_recheck.py     # smoke test
+  PPL_MODELS=llama PPL_TRIALS=5 PPL_NS=50 python ppl_recheck.py   # smoke test
 Writes ppl_recheck.csv.
 """
 from __future__ import annotations
@@ -66,14 +70,15 @@ from baselines.bimark import WatermarkBimark
 # ── Config (mirrors compare.py; keep in sync) ───────────────────────────────
 MODEL_NAMES = [
     "unsloth/Meta-Llama-3.1-8B",
-    #"unsloth/Qwen3.5-9B-Base",
-    #"unsloth/mistral-7b-v0.3",
+    "unsloth/Qwen3.5-9B-Base",
+    "unsloth/mistral-7b-v0.3",
 ]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 N_TRIALS  = int(os.environ.get("PPL_TRIALS", "1000"))
 MODEL_SUB = os.environ.get("PPL_MODELS", "").lower()   # substring filter
-N_TOK     = [20,30,40,50,60]                                          # the table's row
+FIXED_NS  = [int(x) for x in
+             os.environ.get("PPL_NS", "20,30,40,50,60").split(",")]
 K_BITS    = 8
 TOP_K     = 50
 N_PROMPTS = 200
@@ -299,26 +304,27 @@ def run_model(model_name, rows):
 
     schemes = [
         ("MPAC",       SEED_BASE["MPAC"],
-         lambda p, m: gen_mpac(model, tok, vocab_size, p, m, N_TOK)),
+         lambda p, m, n: gen_mpac(model, tok, vocab_size, p, m, n)),
         ("BiMark",     SEED_BASE["BiMark"],
-         lambda p, m: gen_bimark(model, tok, vocab_size, p, m, N_TOK)),
+         lambda p, m, n: gen_bimark(model, tok, vocab_size, p, m, n)),
     ]
 
-    # scheme-major loop, per-trial seeding/order identical to run_fixed_scheme
+    # scheme-major, n_tok inner: identical order to run_fixed_scheme
     for name, seed_base, gen_fn in schemes:
+      for n_tok in FIXED_NS:
         log("\n" + "=" * 72)
-        log(f"[{model_name}] {name} n={N_TOK}  — {N_TRIALS} trials")
+        log(f"[{model_name}] {name} n={n_tok}  — {N_TRIALS} trials")
         log("=" * 72)
         ppl_wm_vals, ppl_base_vals = [], []
         oot_wm = oot_base = ntok_wm = ntok_base = 0
         for i in range(N_TRIALS):
             prompt_ids = pool[i % len(pool)]
             payload = i % (2 ** K_BITS)
-            trial_seed = seed_base + i * 10 + N_TOK
+            trial_seed = seed_base + i * 10 + n_tok
             np.random.seed(trial_seed)
             torch.manual_seed(trial_seed)
             # (1) watermarked generation
-            gen_ids = gen_fn(prompt_ids, payload)
+            gen_ids = gen_fn(prompt_ids, payload, n_tok)
             # (2) teacher-forced full-softmax scoring of the wm text
             logps_wm, o_wm = score_full_softmax(model, prompt_ids, gen_ids)
             ppl_wm = ppl(logps_wm)
@@ -341,13 +347,13 @@ def run_model(model_name, rows):
 
         wm_m, wm_sd, wm_se = mean_std_sem(ppl_wm_vals)
         b_m, b_sd, b_se = mean_std_sem(ppl_base_vals)
-        log(f"\n[{model_name}] {name}: "
+        log(f"\n[{model_name}] {name} n={n_tok}: "
             f"ppl_wm={wm_m:.2f}±{wm_se:.2f} (sd {wm_sd:.2f})  "
             f"ppl_base={b_m:.2f}±{b_se:.2f} (sd {b_sd:.2f})  "
             f"delta={wm_m - b_m:+.2f}  "
             f"oot50_wm={oot_wm / max(1, ntok_wm):.4f} "
             f"oot50_base={oot_base / max(1, ntok_base):.4f}")
-        rows.append(dict(model=model_name, scheme=name, n_tok=N_TOK,
+        rows.append(dict(model=model_name, scheme=name, n_tok=n_tok,
                          trials=N_TRIALS,
                          ppl_wm_mean=wm_m, ppl_wm_std=wm_sd, ppl_wm_se=wm_se,
                          ppl_base_mean=b_m, ppl_base_std=b_sd, ppl_base_se=b_se,
