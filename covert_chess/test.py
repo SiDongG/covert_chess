@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """
-ppl_recheck.py (v2) — Recompute ONLY the perplexity column for MPAC, BiMark,
-StealthInk (+ No-Embedding reference), replicating compare.py's trial logic
+ppl_recheck.py (v3) — Recompute ONLY the perplexity column for MPAC and
+BiMark (each with its own length-matched No-Embedding base columns),
+replicating compare.py's trial logic
 VERBATIM — same truncate-first protocol, same full-softmax scoring, same
 seeding — with exactly ONE change:
 
@@ -13,11 +14,11 @@ seeding — with exactly ONE change:
     neutralizing the hub generation_config at load. Nothing else differs.
 
 Kept identical to compare.py (do NOT "fix" these):
-  * TopKTruncationProcessor(TOP_K) runs BEFORE the MPAC bias and BEFORE the
-    StealthInk reweighting: every scheme operates on the top-50-renormalized
-    base distribution, the shared support of the whole comparison.
-  * StealthInk path byte-for-byte as compare.py (custom loop, never had the
-    nucleus bug) — it is the control; its numbers should reproduce the table.
+  * TopKTruncationProcessor(TOP_K) runs BEFORE the MPAC bias, so MPAC
+    operates on the top-50-renormalized base distribution — the shared
+    support of the whole comparison (BiMark restricts internally).
+  * StealthInk is EXCLUDED: its custom sampling loop never merges the hub
+    generation_config, so its table numbers are unaffected by this bug.
   * Scoring: full softmax for every scheme (compare.py's
     score_tokens_teacher_forced), no truncated reference, no clamps.
   * Seeding: payload = i % 256, trial_seed = seed_base + i*10 + n_tok, seed
@@ -29,8 +30,17 @@ should be ~0 for EVERY scheme (a handful of 1e-3 events are fp16-vs-fp32
 rank-50 ties, harmless). If a scheme shows oot50 >> 0, the protocol did not
 replicate — trust that flag over the PPL numbers.
 
+Output format matches compare.py's CSV perplexity block, per scheme row:
+  ppl_wm_mean, ppl_wm_std, ppl_wm_se, ppl_base_mean, ppl_base_std,
+  ppl_base_se, ppl_delta   (+ oot50_wm / oot50_base diagnostics appended).
+Statistics use compare.py's _mean_std_sem convention (population std,
+se = std/sqrt(n)). Per trial, order matches run_fixed_scheme exactly:
+seed -> watermarked generation -> teacher-forced full-softmax scoring ->
+length-matched base generation (no reseed; RNG state continues), so each
+scheme row carries its own base columns, as in compare.py.
+
 Usage:
-  PPL_TRIALS=200 python ppl_recheck.py
+  python ppl_recheck.py                                   # 1000 trials (default)
   PPL_MODELS=llama PPL_TRIALS=5 python ppl_recheck.py     # smoke test
 Writes ppl_recheck.csv.
 """
@@ -52,9 +62,6 @@ if _THIS_DIR not in sys.path:          # so ./baselines/ is importable
 
 from baselines.mpac import WatermarkLogitsProcessor as MpacLogitsProcessor
 from baselines.bimark import WatermarkBimark
-from baselines.stealthink import (ReweightProcessor as SIReweightProcessor,
-                                  ReweightLogitsProcessor as SIReweightLogitsProcessor,
-                                  generate_exact_n_tokens as si_generate_exact_n_tokens)
 
 # ── Config (mirrors compare.py; keep in sync) ───────────────────────────────
 MODEL_NAMES = [
@@ -64,7 +71,7 @@ MODEL_NAMES = [
 ]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-N_TRIALS  = int(os.environ.get("PPL_TRIALS", "200"))
+N_TRIALS  = int(os.environ.get("PPL_TRIALS", "1000"))
 MODEL_SUB = os.environ.get("PPL_MODELS", "").lower()   # substring filter
 N_TOK     = 50                                          # the table's row
 K_BITS    = 8
@@ -82,11 +89,8 @@ BIMARK_PARTITION_SEEDS = [
     int(x) for x in
     np.random.default_rng(SHARED_SEED).choice(10000, BIMARK_LAYERS, replace=False)
 ]
-# StealthInk knobs
-STEALTHINK_CAPACITY, STEALTHINK_NGRAM = 1, 3
-
 # per-scheme trial seed bases — MUST match compare.py's FIXED_SCHEME_TABLE
-SEED_BASE = {"MPAC": 70000, "BiMark": 80000, "StealthInk": 90000}
+SEED_BASE = {"MPAC": 70000, "BiMark": 80000}   # as compare.py FIXED_SCHEME_TABLE
 
 OUT_CSV = "ppl_recheck.csv"
 
@@ -99,11 +103,9 @@ def log(*a, **kw):
 class TopKTruncationProcessor:
     """Truncate logits to the top-k BEFORE a downstream watermark processor.
 
-    Placed first in a LogitsProcessorList, this hands the watermark scheme the
-    top-k-renormalized base distribution, so MPAC biases within the same
-    candidate set as the shared top-50 base reference, and StealthInk's
-    unbiasedness guarantee (which holds for any input distribution) becomes
-    "unbiased w.r.t. top-50 sampling" -- matching ArcMark/BiMark's support.
+    Placed first in the logits_processor list, this hands the watermark
+    scheme the top-k-renormalized base distribution, so MPAC biases within
+    the same candidate set as the shared top-50 base reference.
     NOTE: truncating AFTER the watermark processor would instead re-distort
     the watermarked distribution, so order matters.
     """
@@ -204,10 +206,14 @@ def ppl(logps):
 # ── Generations: VERBATIM compare.py trial logic (+ nucleus fix where noted) ─
 @torch.no_grad()
 def gen_base(model, prompt_ids, n_tokens):
-    """No-embedding reference: top-50 sampling, exactly baseline_logprobs."""
+    """Length-matched no-embedding reference, exactly compare.py's
+    baseline_logprobs_and_tokens: sample from the top-50-truncated
+    distribution, but log the FULL-softmax probability of each sampled token
+    (log probs[tok], not trunc[tok]). Returns (logps, token_ids)."""
     ids = torch.tensor(prompt_ids, dtype=torch.long,
                        device=model.device).unsqueeze(0)
-    past, cur, out_ids = None, ids, []
+    past, cur = None, ids
+    logps, out_ids = [], []
     for _ in range(n_tokens):
         out = model(input_ids=cur, past_key_values=past, use_cache=True)
         past = out.past_key_values
@@ -217,9 +223,10 @@ def gen_base(model, prompt_ids, n_tokens):
         trunc[topk.indices] = topk.values
         trunc = trunc / trunc.sum()
         tok = int(torch.multinomial(trunc, 1).item())
+        logps.append(float(torch.log(probs[tok].clamp_min(1e-30)).item()))
         out_ids.append(tok)
         cur = torch.tensor([[tok]], dtype=torch.long, device=model.device)
-    return out_ids
+    return logps, out_ids
 
 
 @torch.no_grad()
@@ -275,43 +282,14 @@ def gen_bimark(model, tokenizer, vocab_size, prompt_ids, payload_int, n_tokens):
     return output[0, len(prompt_ids):].detach().cpu().tolist()
 
 
-@torch.no_grad()
-def gen_stealthink(model, tokenizer, vocab_size, prompt_ids, payload_int,
-                   n_tokens):
-    """VERBATIM compare.py — truncate-first protocol, custom loop, no change.
-    This is the control: it never had the nucleus bug, so its PPL should
-    reproduce the table row."""
-    num_value = 2 ** STEALTHINK_CAPACITY
-    R = 1.0 / num_value
-    converted_msg_length = K_BITS // STEALTHINK_CAPACITY
-    bits = format(payload_int, f"0{K_BITS}b")
-    embedded_message = [
-        int(bits[p * STEALTHINK_CAPACITY:(p + 1) * STEALTHINK_CAPACITY], 2)
-        for p in range(converted_msg_length)]
-    vocab = list(range(vocab_size))       # logits dim, matching compare.py
-    rp = SIReweightProcessor(vocab=vocab)
-    lp = SIReweightLogitsProcessor(
-        rp, embedded_message=embedded_message, n_gram_len=STEALTHINK_NGRAM,
-        R=R, converted_msg_length=converted_msg_length, seen_seeds=set())
-    inputs = torch.tensor(prompt_ids, dtype=torch.long,
-                          device=model.device).unsqueeze(0)
-    seq = si_generate_exact_n_tokens(
-        model=model, tokenizer=tokenizer, inputs=inputs,
-        # Truncate-first, then reweight (verbatim compare.py protocol).
-        logits_processor=LogitsProcessorList(
-            [TopKTruncationProcessor(TOP_K), lp]),
-        n_new_tokens=n_tokens, do_sample=True, temperature=1.0,
-        top_k=0,             # must remain 0: see compare.py comment
-        eos_id=tokenizer.eos_token_id, soft_eos_penalty=0.0)
-    return seq[0, len(prompt_ids):].detach().cpu().tolist()
-
-
 # ── Driver ──────────────────────────────────────────────────────────────────
-def mean_se(vals):
-    v = [x for x in vals if not math.isnan(x)]
+def mean_std_sem(vals):
+    """Exactly compare.py's _mean_std_sem: population std, se = sd/sqrt(n)."""
+    v = [x for x in vals if not (isinstance(x, float) and math.isnan(x))]
     if not v:
-        return float("nan"), float("nan")
-    return float(np.mean(v)), float(np.std(v) / math.sqrt(len(v)))
+        return float("nan"), float("nan"), float("nan")
+    m = float(np.mean(v)); sd = float(np.std(v))
+    return m, sd, sd / math.sqrt(len(v))
 
 
 def run_model(model_name, rows):
@@ -319,51 +297,63 @@ def run_model(model_name, rows):
     vocab_size = model.config.vocab_size
     pool = build_prompt_pool(tok)
 
-    schemes = {
-        "No Embedding": None,
-        "MPAC":       lambda p, m: gen_mpac(model, tok, vocab_size, p, m, N_TOK),
-        "BiMark":     lambda p, m: gen_bimark(model, tok, vocab_size, p, m, N_TOK),
-        "StealthInk": lambda p, m: gen_stealthink(model, tok, vocab_size, p, m, N_TOK),
-    }
+    schemes = [
+        ("MPAC",       SEED_BASE["MPAC"],
+         lambda p, m: gen_mpac(model, tok, vocab_size, p, m, N_TOK)),
+        ("BiMark",     SEED_BASE["BiMark"],
+         lambda p, m: gen_bimark(model, tok, vocab_size, p, m, N_TOK)),
+    ]
 
-    results = {s: {"ppl": [], "oot": 0, "ntok": 0} for s in schemes}
-    for i in range(N_TRIALS):
-        prompt_ids = pool[i % len(pool)]
-        payload = i % (2 ** K_BITS)         # identical to run_fixed_scheme
+    # scheme-major loop, per-trial seeding/order identical to run_fixed_scheme
+    for name, seed_base, gen_fn in schemes:
+        log("\n" + "=" * 72)
+        log(f"[{model_name}] {name} n={N_TOK}  — {N_TRIALS} trials")
+        log("=" * 72)
+        ppl_wm_vals, ppl_base_vals = [], []
+        oot_wm = oot_base = ntok_wm = ntok_base = 0
+        for i in range(N_TRIALS):
+            prompt_ids = pool[i % len(pool)]
+            payload = i % (2 ** K_BITS)
+            trial_seed = seed_base + i * 10 + N_TOK
+            np.random.seed(trial_seed)
+            torch.manual_seed(trial_seed)
+            # (1) watermarked generation
+            gen_ids = gen_fn(prompt_ids, payload)
+            # (2) teacher-forced full-softmax scoring of the wm text
+            logps_wm, o_wm = score_full_softmax(model, prompt_ids, gen_ids)
+            ppl_wm = ppl(logps_wm)
+            # (3) length-matched base generation — NO reseed, RNG state
+            #     continues after the wm generation, exactly as compare.py
+            bl, base_ids = gen_base(model, prompt_ids, len(gen_ids))
+            ppl_b = ppl(bl)
+            _, o_b = score_full_softmax(model, prompt_ids, base_ids)
 
-        for name, gen_fn in schemes.items():
-            if gen_fn is None:
-                np.random.seed(50000 + i * 10 + N_TOK)
-                torch.manual_seed(50000 + i * 10 + N_TOK)
-                gen_ids = gen_base(model, prompt_ids, N_TOK)
-            else:
-                trial_seed = SEED_BASE[name] + i * 10 + N_TOK   # as compare.py
-                np.random.seed(trial_seed)
-                torch.manual_seed(trial_seed)
-                gen_ids = gen_fn(prompt_ids, payload)
-            logps, oot = score_full_softmax(model, prompt_ids, gen_ids)
-            results[name]["ppl"].append(ppl(logps))
-            results[name]["oot"] += oot
-            results[name]["ntok"] += len(gen_ids)
+            ppl_wm_vals.append(ppl_wm)
+            ppl_base_vals.append(ppl_b)
+            oot_wm += o_wm;  ntok_wm += len(gen_ids)
+            oot_base += o_b; ntok_base += len(base_ids)
+            if (i + 1) % 25 == 0 or i == 0:
+                log(f"  trial {i + 1:>4}/{N_TRIALS}: "
+                    f"ppl_wm={ppl_wm:.2f} ppl_base={ppl_b:.2f}")
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        if (i + 1) % 10 == 0 or i == 0:
-            snap = "  ".join(f"{n}={np.nanmean(r['ppl']):.2f}"
-                             for n, r in results.items())
-            log(f"  trial {i + 1:>4}/{N_TRIALS}:  {snap}")
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    log(f"\n[{model_name}] PPL recheck (n={N_TOK}, {N_TRIALS} trials, "
-        f"truncate-first protocol, full-softmax reference):")
-    log(f"  {'scheme':<14} {'PPL mean±SE':>16} {'oot50 rate':>11}")
-    for name, r in results.items():
-        m, se = mean_se(r["ppl"])
-        oot_rate = r["oot"] / max(1, r["ntok"])
-        log(f"  {name:<14} {m:>10.2f} ± {se:.2f} {oot_rate:>10.4f}")
+        wm_m, wm_sd, wm_se = mean_std_sem(ppl_wm_vals)
+        b_m, b_sd, b_se = mean_std_sem(ppl_base_vals)
+        log(f"\n[{model_name}] {name}: "
+            f"ppl_wm={wm_m:.2f}±{wm_se:.2f} (sd {wm_sd:.2f})  "
+            f"ppl_base={b_m:.2f}±{b_se:.2f} (sd {b_sd:.2f})  "
+            f"delta={wm_m - b_m:+.2f}  "
+            f"oot50_wm={oot_wm / max(1, ntok_wm):.4f} "
+            f"oot50_base={oot_base / max(1, ntok_base):.4f}")
         rows.append(dict(model=model_name, scheme=name, n_tok=N_TOK,
-                         trials=N_TRIALS, ppl_mean=m, ppl_se=se,
-                         oot50_rate=oot_rate))
+                         trials=N_TRIALS,
+                         ppl_wm_mean=wm_m, ppl_wm_std=wm_sd, ppl_wm_se=wm_se,
+                         ppl_base_mean=b_m, ppl_base_std=b_sd, ppl_base_se=b_se,
+                         ppl_delta=wm_m - b_m,
+                         oot50_wm=oot_wm / max(1, ntok_wm),
+                         oot50_base=oot_base / max(1, ntok_base)))
 
     del model, tok
     gc.collect()
@@ -385,15 +375,22 @@ def main():
             log(f"!! Model {model_name} failed: {e!r}")
 
     with open(OUT_CSV, "w") as f:
-        f.write("model,scheme,n_tok,trials,ppl_mean,ppl_se,oot50_rate\n")
+        f.write("model,scheme,n_tok,trials,"
+                "ppl_wm_mean,ppl_wm_std,ppl_wm_se,"
+                "ppl_base_mean,ppl_base_std,ppl_base_se,ppl_delta,"
+                "oot50_wm,oot50_base\n")
         for r in rows:
             f.write(f"{r['model']},{r['scheme']},{r['n_tok']},{r['trials']},"
-                    f"{r['ppl_mean']:.4f},{r['ppl_se']:.4f},"
-                    f"{r['oot50_rate']:.6f}\n")
+                    f"{r['ppl_wm_mean']:.4f},{r['ppl_wm_std']:.4f},"
+                    f"{r['ppl_wm_se']:.4f},"
+                    f"{r['ppl_base_mean']:.4f},{r['ppl_base_std']:.4f},"
+                    f"{r['ppl_base_se']:.4f},{r['ppl_delta']:.4f},"
+                    f"{r['oot50_wm']:.6f},{r['oot50_base']:.6f}\n")
     log(f"\nWrote {OUT_CSV}")
-    log("Sanity: oot50 ~ 0 for ALL schemes (truncate-first protocol; ~1e-3 "
-        "fp16 rank-50 ties are fine). StealthInk should reproduce the table; "
-        "on Llama, MPAC/BiMark should move UP from 6.2 toward/above base.")
+    log("Sanity: oot50 ~ 0 everywhere (truncate-first protocol; ~1e-3 fp16 "
+        "rank-50 ties are fine). On Llama, MPAC/BiMark should move UP from "
+        "~6.2 toward/above their base columns; Qwen/Mistral should "
+        "reproduce the table within noise.")
 
 
 if __name__ == "__main__":
