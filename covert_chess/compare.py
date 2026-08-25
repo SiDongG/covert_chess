@@ -1,6 +1,26 @@
 """
 compare.py — Burnashev-ArcMark (BAM) vs Fixed-Length ArcMark vs open-source
 multi-bit baselines (MPAC, BiMark, StealthInk) on C4 RealNews.
+
+Changes vs previous revision:
+  * NEW BASELINES: MPAC (Yoo et al., NAACL 2024), BiMark (Feng et al., ICML
+    2025), and StealthInk (Jiang et al., ICML 2025), all run at the same
+    fixed lengths as Fixed-Length ArcMark (FIXED_NS = 20..60), 8-bit payload,
+    C4 prompts, same seeds/prompt pairing. Implementations are vendored
+    verbatim from the official repos under ./baselines/ (see its __init__.py
+    for provenance); each scheme keeps its OWN hashing/decoding machinery.
+  * TIMING: per-trial wall-clock (perf_counter + cuda.synchronize) split into
+    gen_sec (watermarked generation only) and dec_sec (decode only). Reported
+    as sec/token for generation. Teacher-forced PPL scoring and the
+    length-matched base generation are excluded from both. The base
+    generation itself is timed separately (base_sec_tok) as the no-embedding
+    reference. BAM's decode is integrated into its interactive loop, so its
+    dec_sec is 0 by construction (noted in the CSV).
+  * REMOVED: the TF-IDF steganalysis-F1 detector (metric discarded).
+
+Confirmation phase (unchanged): the 1-bit ACK/NACK confirmation is a genuine
+2-symbol ANTIPODAL channel with its own clean 2-hypothesis likelihood and its
+own noise floor EPS_CONF.
 """
 
 from __future__ import annotations
@@ -58,7 +78,7 @@ MODEL_NAMES = [
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 SMOKE_TEST = False
-N_TRIALS   = 100 if not SMOKE_TEST else 4
+N_TRIALS   = 1000 if not SMOKE_TEST else 4
 
 FIXED_NS = [20, 30, 40, 50, 60] if not SMOKE_TEST else [32]
 
@@ -66,14 +86,11 @@ FIXED_NS = [20, 30, 40, 50, 60] if not SMOKE_TEST else [32]
 # Fixed across the sweep: gamma=0.5, rho_NACK=0.75, (eps, eps_ACK)=(0.4, 0.4),
 # T*=MAX_TOKENS=1000. Only rho_ACK varies, tied to L via rho_ACK = 1 - 1/L,
 # i.e. BAM(0.5, 1 - L^{-1}, 0.75, (0.4, 0.4), 1000) for each L below.
-#L_VALUES = (
-#    [2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 32768, 32768*4]
-#    if not SMOKE_TEST else [8]
-#)
 L_VALUES = (
-    [32768*4]
+    [2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 32768, 32768*4]
     if not SMOKE_TEST else [8]
 )
+
 GAMMA      = 0.5     # gamma  (communication-phase decision threshold g1)
 RHO_NACK   = 0.75    # rho_NACK
 # Each config is (g1=gamma, ra=rho_ACK=1-1/L, rn=rho_NACK, name)
@@ -158,8 +175,11 @@ BIMARK_PARTITION_SEEDS = [
 # StealthInk (Jiang et al., ICML 2025): distribution-preserving reweighting
 # over randomized vocabulary permutations. Repo defaults: chunk capacity 1
 # (1 bit / position => 8 positions for our 8-bit payload), 3-gram seeding
-# ("simple_3"), full-vocab sampling (top_k=0 — the reweighting already zeroes
-# the red mass), temperature 1.0.
+# ("simple_3"), temperature 1.0. Unlike the released script (full-vocab
+# sampling), we reweight the TOP-50-truncated base distribution: the
+# unbiasedness guarantee holds for any input distribution, so the scheme is
+# distortion-free w.r.t. top-50 sampling -- the same support as ArcMark and
+# BiMark and the shared no-embedding reference (see TopKTruncationProcessor).
 STEALTHINK_CAPACITY = 1
 STEALTHINK_NGRAM    = 3
 
@@ -210,6 +230,28 @@ def _mean_std_sem(vals: list[float]) -> tuple[float, float, float]:
 def _cuda_sync():
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+
+
+class TopKTruncationProcessor:
+    """Truncate logits to the top-k BEFORE a downstream watermark processor.
+
+    Placed first in a LogitsProcessorList, this hands the watermark scheme the
+    top-k-renormalized base distribution, so MPAC biases within the same
+    candidate set as the shared top-50 base reference, and StealthInk's
+    unbiasedness guarantee (which holds for any input distribution) becomes
+    "unbiased w.r.t. top-50 sampling" -- matching ArcMark/BiMark's support.
+    NOTE: truncating AFTER the watermark processor would instead re-distort
+    the watermarked distribution, so order matters.
+    """
+
+    def __init__(self, k: int):
+        self.k = k
+
+    def __call__(self, input_ids, scores):
+        if self.k and 0 < self.k < scores.shape[-1]:
+            kth = torch.topk(scores, self.k, dim=-1).values[..., -1, None]
+            return scores.masked_fill(scores < kth, float("-inf"))
+        return scores
 
 
 class WallTimer:
@@ -366,21 +408,7 @@ def baseline_logprobs_and_tokens(prompt_ids: list[int],
 
 @torch.no_grad()
 def score_tokens_teacher_forced(prompt_ids: list[int],
-                                gen_token_ids: list[int],
-                                top_k: int | None = None) -> list[float]:
-    """Teacher-forced per-token log-probabilities of ``gen_token_ids``.
-
-    When ``top_k`` is given, each position's log-probability is computed under
-    the SAME top-k-truncated-and-renormalized reference distribution used by
-    ArcMark/BAM and the length-matched base generation (see
-    ``baseline_logprobs``), rather than the full-vocabulary softmax. This makes
-    the perplexity of schemes that sample from the full distribution (MPAC,
-    StealthInk, which generate with top_k=0) directly comparable to the
-    top-k-referenced perplexity reported for ArcMark/BAM. A token that falls
-    outside the position's top-k set is scored under the renormalized top-k
-    distribution (probability ~0), i.e. it is penalized exactly as an
-    out-of-support token would be for the ArcMark reference.
-    """
+                                gen_token_ids: list[int]) -> list[float]:
     if len(gen_token_ids) == 0:
         return []
     model = CTX.model
@@ -388,25 +416,12 @@ def score_tokens_teacher_forced(prompt_ids: list[int],
     ids = torch.tensor(full, dtype=torch.long, device=model.device).unsqueeze(0)
     out = model(ids, use_cache=False)
     logits = out.logits[0].float()
+    logprobs = torch.log_softmax(logits, dim=-1)
     p_len = len(prompt_ids)
-
-    if top_k is None or top_k <= 0:
-        logprobs = torch.log_softmax(logits, dim=-1)
-        return [float(logprobs[p_len + i - 1, tok].item())
-                for i, tok in enumerate(gen_token_ids)]
-
-    # Top-k-truncated reference: match baseline_logprobs' distribution exactly.
     logps: list[float] = []
-    V = logits.shape[-1]
-    k = min(top_k, V)
     for i, tok in enumerate(gen_token_ids):
         pos = p_len + i - 1
-        probs = torch.softmax(logits[pos], dim=-1)
-        topk = torch.topk(probs, k)
-        trunc = torch.zeros_like(probs)
-        trunc[topk.indices] = topk.values
-        trunc = trunc / trunc.sum()
-        logps.append(float(torch.log(trunc[tok].clamp_min(1e-30)).item()))
+        logps.append(float(logprobs[pos, tok].item()))
     return logps
 
 
@@ -863,17 +878,22 @@ def mpac_trial(prompt_ids, payload_int, n_tokens):
             attention_mask=torch.ones_like(inputs),
             do_sample=True,
             temperature=1.0,
-            top_k=0,             # MPAC pipeline style: pure sampling of biased dist
+            top_k=0,             # truncation handled by the processor below
             min_new_tokens=n_tokens,
             max_new_tokens=n_tokens,
             eos_token_id=None,
             pad_token_id=tokenizer.pad_token_id,
-            logits_processor=[proc],
+            # Truncate-first, then bias: MPAC operates on the same top-50
+            # candidate set as the shared no-embedding base reference, so its
+            # delta-PPL isolates the bias distortion rather than full-vocab
+            # tail sampling. (Deviation from the released pipeline, which
+            # samples the biased full-vocab distribution.)
+            logits_processor=[TopKTruncationProcessor(TOP_K), proc],
         )
     gen_ids = output[0, len(prompt_ids):].detach().cpu().tolist()
     positions = proc.flush_position()[0]   # gold bit positions (metric only)
 
-    base_logps = score_tokens_teacher_forced(prompt_ids, gen_ids, top_k=TOP_K)
+    base_logps = score_tokens_teacher_forced(prompt_ids, gen_ids)
 
     detector = MpacDetector(
         vocab=list(range(CTX.vocab_size)),
@@ -998,17 +1018,26 @@ def stealthink_trial(prompt_ids, payload_int, n_tokens, trial_seed):
             model=model,
             tokenizer=tokenizer,
             inputs=inputs,
-            logits_processor=LogitsProcessorList([lp]),
+            # Truncate-first, then reweight: StealthInk's unbiasedness holds
+            # for any input distribution, so feeding the top-50-renormalized
+            # distribution makes it distortion-free w.r.t. top-50 sampling --
+            # the same support as ArcMark/BiMark and the shared base
+            # reference. Truncating AFTER the reweighting (e.g. via this
+            # function's top_k argument) would re-distort the watermarked
+            # distribution, so it stays 0 here. (Deviation from the released
+            # script, which reweights the full-vocab distribution.)
+            logits_processor=LogitsProcessorList(
+                [TopKTruncationProcessor(TOP_K), lp]),
             n_new_tokens=n_tokens,
             do_sample=True,
             temperature=1.0,
-            top_k=0,             # reweighting already zeroes the red mass
+            top_k=0,             # must remain 0: see comment above
             eos_id=tokenizer.eos_token_id,
             soft_eos_penalty=0.0,
         )
     gen_ids = seq[0, len(prompt_ids):].detach().cpu().tolist()
 
-    base_logps = score_tokens_teacher_forced(prompt_ids, gen_ids, top_k=TOP_K)
+    base_logps = score_tokens_teacher_forced(prompt_ids, gen_ids)
 
     with WallTimer() as tim_dec:
         _, _, msg = stealthink_decode(
