@@ -34,25 +34,9 @@ from arcmark.sinkhorn import extract_conditional, solve_arcmark_ot
 from arcmark.side_info import SideInfoMode, compute_key_si
 
 
-# ============================================================================
-# Configuration
-# ============================================================================
 MODEL_NAMES = [
-    'meta-llama/Llama-3.1-8B-Instruct',
-    'microsoft/phi-4',                     # Phi-4, 14B dense, ungated (MIT)
-    'Qwen/Qwen3-30B-A3B-Instruct-2507',    # 30B MoE (3B active), non-thinking
+    'Qwen/Qwen3-30B-A3B-Instruct-2507'
 ]
-# Short filename tags per model (per-model CSV/PNG/rollout outputs).
-MODEL_TAGS = {
-    'meta-llama/Llama-3.1-8B-Instruct': 'llama8b',
-    'microsoft/phi-4': 'phi4-14b',
-    'Qwen/Qwen3-30B-A3B-Instruct-2507': 'qwen30b',
-}
-# Per-model device_map. Small models sit on one device; the 30B MoE
-# (~60GB fp16) is sharded with "auto" (override via env DEVICE_MAP).
-MODEL_DEVICE_MAP = {
-    'Qwen/Qwen3-30B-A3B-Instruct-2507': os.environ.get("DEVICE_MAP", "auto"),
-}
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 if DEVICE == "cpu":
     raise SystemExit(
@@ -64,22 +48,14 @@ SMOKE_TEST = False
 N_DIALOGUES = 100 if not SMOKE_TEST else 2
 ROUNDS_PER_DIALOGUE = 10 if not SMOKE_TEST else 4
 
-# Single BAM operating point.
 BAM_G1   = 0.5
 BAM_G2   = 0.9999999
 BAM_RACK = 0.984375
 BAM_RNACK = 0.75
-# Note that in the actual script, G2 and BAM_RACK are inert, meaning they don't actually affect 
-# the algorithm, BAM_RACK is superceded by SPILL_BELIEF_THR = 0.75 
 
 MAX_CONF_STEPS  = 80
 MIN_COMM_TOKENS = 0
-# Total token budget for a single payload, summed across the turns it spans.
 MAX_PAYLOAD_TOKENS = 800
-# Confidence-gated spill: at a turn's EOS, if the relevant belief is below
-# SPILL_BELIEF_THR (top-message belief, or rho_ACK while confirming), the
-# payload does NOT force-decode — it spills to a filler/resume turn so it can
-# finish later. After MAX_SPILLS spills it force-decodes regardless.
 SPILL_BELIEF_THR = 0.75
 MAX_SPILLS       = 3
 N_PRINT_TRANSCRIPTS = 2
@@ -87,19 +63,15 @@ N_PRINT_TRANSCRIPTS = 2
 OUT_PLOT = "turnbased_bam_matrix.png"
 OUT_CSV  = "turnbased_bam_matrix.csv"
 
-# ── ArcMark core knobs (unchanged) ──────────────────────────────────────────
 P_FIELD            = 4
 R_RESOLUTION       = 4
-SHARED_SEED        = 0x9E3779B97F4A7C15F39CC0605CEDC834  # 128-bit (lambda=128); matches compare.py
+SHARED_SEED        = 0x9E3779B97F4A7C15F39CC0605CEDC834
 TOP_K              = 50
 SINKHORN_REG       = 0.2
 SINKHORN_MAX_ITER  = 4000
 SINKHORN_STOP_THR  = 1e-4
 PHI                = 0.0
 
-# M_MSG is now PER-TASK (see TASKS). The reserved STOP payload is always the
-# top index of whatever message space the task uses; here we keep a single
-# global STOP convention by reserving the LAST index of each task's space.
 ARC_CONFIG = ArcMarkConfig(
     top_k=TOP_K,
     top_p=None,
@@ -149,12 +121,12 @@ class TicTacToeGen(TaskGen):
             self.reset(rng)
         lm = self._legal()
         n = len(lm)
-        idx = int(rng.randint(n))            # index into legal set
+        idx = int(rng.randint(n))
         move = lm[idx]
         self.b[move] = self.p; self.p = 3 - self.p
-        M = n + 1                            # +1 reserved STOP slot
-        r, c = divmod(move, 3)               # 0-indexed row, col on 3x3 board
-        label = f"({r+1},{c+1})"             # 1-indexed (row,col)
+        M = n + 1
+        r, c = divmod(move, 3)
+        label = f"({r+1},{c+1})"
         return idx, M, math.log2(n), label
 
 
@@ -171,16 +143,15 @@ class ChessGen(TaskGen):
             self.reset(rng); lm = list(self.bd.legal_moves)
         n = len(lm)
         idx = int(rng.randint(n))
-        label = lm[idx].uci()                # e.g. "e2e4", "g1f3"
+        label = lm[idx].uci()
         self.bd.push(lm[idx])
-        M = n + 1                            # +1 reserved STOP slot
+        M = n + 1
         return idx, M, math.log2(n), label
 
 
 class Go19Gen(TaskGen):
     name = "go19"
     N = 19
-    # Go column letters skip 'I' by convention: A-H, J-T for a 19-wide board.
     _COLS = "ABCDEFGHJKLMNOPQRST"
     def reset(self, rng):
         self.occ = set()
@@ -189,15 +160,13 @@ class Go19Gen(TaskGen):
         free = pts - len(self.occ)
         if free <= 1:
             self.reset(rng); free = pts
-        # the payload is the index into the empty-point list)
         empties = [x for x in range(pts) if x not in self.occ]
         n = len(empties)
         idx = int(rng.randint(n))
         point = empties[idx]
         self.occ.add(point)
         M = n + 1
-        row, col = divmod(point, self.N)     # 0-indexed
-        # Go coords: column letter + row number (1 at bottom -> use N-row)
+        row, col = divmod(point, self.N)
         label = f"{self._COLS[col]}{self.N - row}"
         return idx, M, math.log2(n), label
 
@@ -209,19 +178,6 @@ TASKS = {
 }
 
 
-# ============================================================================
-# CONVERSATION PROFILES — per-turn token budgets + framing.
-#
-# Topic/opener SEEDS are loaded from an external dataset file
-# (SEEDS_PATH, default conversation_seeds.json) with 50 {topic, opener} pairs
-# per setting. Each dialogue samples one seed, so cover text varies across
-# dialogues (topic-robustness + more independent samples).
-#
-# The side_a / side_b prompts here are TOPIC-AGNOSTIC role selectors: they name
-# which speaker the agent is and the register to write in, but say nothing
-# about the subject or stance. All specifics — including, for debates, BOTH
-# opposing positions — live in the seed's `topic` string.
-# ============================================================================
 import json as _json
 
 SEEDS_PATH = os.environ.get(
@@ -269,28 +225,28 @@ class ConvProfile:
 
 class ChatProfile(ConvProfile):
     name = "chat"
-    max_turn_tokens = 90          # middle ground between terse and rambly
+    max_turn_tokens = 90
     max_filler_tokens = 40
     side_a = ("You are Friend A in a casual text chat with a friend. Reply "
               "naturally, like a real text message — lowercase, conversational. "
-              "Reply should be within 50 words.")
+              "Try to be within 50 words.")
     side_b = ("You are Friend B in a casual text chat with a friend. Reply "
               "naturally, like a real text message — lowercase, conversational. "
-              "Reply should be within 50 words.")
+              "Try to be within 50 words.")
 
 
 class DebateProfile(ConvProfile):
     name = "debate"
-    max_turn_tokens = 300         # medium, EOS-stable
+    max_turn_tokens = 300
     max_filler_tokens = 64
     side_a = ("You are User A in a Reddit-style debate thread. Argue your "
               "assigned position (given in the setup) naturally, staying in "
               "character and defending your side. Reply to the most recent "
-              "message, like a Reddit exchange. Reply should be within 100 words.")
+              "message, like a Reddit exchange. Try to be within 100 words.")
     side_b = ("You are User B in a Reddit-style debate thread. Argue your "
               "assigned position (given in the setup) naturally, staying in "
               "character and defending your side. Reply to the most recent "
-              "message, like a Reddit exchange. Reply should be within 100 words.")
+              "message, like a Reddit exchange. Try to be within 100 words.")
 
 
 CONVERSATIONS = {
@@ -310,9 +266,6 @@ def pick_seed(profile, dialogue_index):
 
 
 
-# ============================================================================
-# Per-model context  
-# ============================================================================
 class LMContext:
     def __init__(self, model_name: str):
         self.model_name = model_name
@@ -322,9 +275,9 @@ class LMContext:
         )
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        _device_map = os.environ.get("DEVICE_MAP", "auto")
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.float16,
-            device_map=MODEL_DEVICE_MAP.get(model_name, DEVICE),
+            model_name, torch_dtype=torch.float16, device_map=_device_map
         )
         self.model.eval()
         self.vocab_size = self.model.get_output_embeddings().weight.shape[0]
@@ -432,9 +385,6 @@ class IncrementalLM:
         self._last_logits = None
 
 
-# ============================================================================
-# Shared emission / read primitives  
-# ============================================================================
 def _context_tokens_for_step(emitted, context_width):
     pad_len = max(0, context_width - len(emitted))
     return tuple([0] * pad_len + emitted[-context_width:])
@@ -500,9 +450,6 @@ def read_symbol_angle(token_id, key_context):
     return (theta - s_angle) % (2.0 * math.pi)
 
 
-# ============================================================================
-# BAM posterior machinery — robust LAPLACE  (unchanged math; M is now passed in)
-# ============================================================================
 P_SYM      = P_FIELD
 _SIGMA     = math.pi / P_SYM
 _B_LAPLACE = float(os.environ.get("LAPLACE_B", _SIGMA / math.sqrt(2.0)))
@@ -540,13 +487,9 @@ def message_likelihood(ells, pi):
     return q
 
 
-# ============================================================================
-# CONFIRMATION phase — Algorithm 1 (posterior matching) at p = 2
-# ============================================================================
-
 P_CONF   = 2
-SYM_ACK  = 0                     # u_ACK  -> angle 0
-SYM_NACK = 1                     # u_NACK -> angle pi at p = 2
+SYM_ACK  = 0
+SYM_NACK = 1
 
 EPS_CONF   = 0.3
 _SIGMA_CONF = math.pi / 2.0
@@ -574,16 +517,13 @@ def conf_symbol_likelihood(angle_obs):
     return (1.0 - EPS_CONF) * signal + EPS_CONF / (2.0 * math.pi)
 
 
-# ============================================================================
-# Payload transmission state — now carries M_MSG and coded_bits for THIS payload
-# ============================================================================
 class PayloadState:
     def __init__(self, payload, M_msg, coded_bits, label=""):
         self.payload = payload
         self.M = M_msg
-        self.stop_msg = M_msg - 1            # reserved STOP slot for this task
+        self.stop_msg = M_msg - 1
         self.coded_bits = coded_bits
-        self.label = label                   # human-readable move string
+        self.label = label
         self.pi = np.ones(M_msg) / M_msg
         self.knockdown = np.ones(M_msg)
         self.tokens_used = 0
@@ -592,7 +532,7 @@ class PayloadState:
         self.conf_rho = np.array([0.5, 0.5])
         self.conf_cand = -1
         self.conf_true_bit = 0
-        self.n_spills = 0                    # times this payload has spilled
+        self.n_spills = 0
 
 
 def dist_entropy_bits(probs):
@@ -609,7 +549,7 @@ class TurnResult:
         self.n_tokens = 0
         self.n_pad_tokens = 0
         self.base_logprobs = []
-        self.entropies = []          # per-step entropy (bits) of unwm dist
+        self.entropies = []
         self.completed = False
         self.ended_by_eos = False
         self.decoder_decoded = -1
@@ -617,10 +557,6 @@ class TurnResult:
         self.mis_ack = False
 
 
-# ============================================================================
-# Watermarked turn — M_MSG now taken from the PayloadState (st.M). The
-# per-turn token cap is passed in from the conversation profile.
-# ============================================================================
 def run_watermarked_turn(prompt_ids, history_tokens, st, max_turn_tokens,
                          g1, g2, ra, rn) -> TurnResult:
     """EOS-as-sole-decode-trigger model.
@@ -629,28 +565,25 @@ def run_watermarked_turn(prompt_ids, history_tokens, st, max_turn_tokens,
     an EOS (or a token cap is hit), and only THEN decodes, taking argmax of the
     effective posterior at that point. Threshold crossings (g1/g2) and the
     ACK/NACK confirmation phase still run and update belief, but they NO LONGER
-    end the turn — they are decorative under this scheme. 
+    end the turn — they are decorative under this scheme. Consequences:
+      * every payload resolves at its turn's EOS  -> 100% completion,
+      * one payload per turn (no spill / resume / multi-turn payloads),
+      * no post-payload padding phase (the turn already ran to EOS), so a
+        completed turn's carrier/total token ratio is 100%.
     """
     res = TurnResult()
     lm = IncrementalLM(list(prompt_ids))
     turn_tokens = 0
     M = st.M
-    crossed_g2 = False          # belief ever passed g2 (decorative marker)
-    crossed_g1 = False          # belief ever passed g1 (decorative marker)
+    crossed_g2 = False
+    crossed_g1 = False
     try:
-        # symbol to emit: while not "confirming", posterior-match the payload;
-        # once belief crosses g1 we switch to emitting the antipodal ACK symbol
-        # for the current argmax candidate (confirmation), but this never ends
-        # the turn — it only keeps conf_rho evolving.
         while turn_tokens < max_turn_tokens and st.tokens_used < MAX_PAYLOAD_TOKENS:
             probs = lm.probs()
-
             if int(torch.argmax(probs).item()) in CTX.eos_ids:
                 res.ended_by_eos = True
                 break
 
-            # Mask chat-template boundary/role tokens so they can never be
-            # emitted as watermark carriers (defense in depth against seams).
             if CTX.boundary_ids:
                 bidx = torch.tensor(sorted(CTX.boundary_ids),
                                     device=probs.device, dtype=torch.long)
@@ -664,7 +597,6 @@ def run_watermarked_turn(prompt_ids, history_tokens, st, max_turn_tokens,
                                                ARC_CONFIG.context_width)
 
             if st.in_confirmation:
-                # confirmation: emit antipodal ACK/NACK symbol at p=2
                 tx_symbol = SYM_ACK if st.conf_true_bit == 0 else SYM_NACK
                 x, blp = emit_token(probs, key_ctx, tx_symbol,
                                     alphabet_size=P_CONF)
@@ -675,8 +607,6 @@ def run_watermarked_turn(prompt_ids, history_tokens, st, max_turn_tokens,
                 ell = conf_symbol_likelihood(angle)
                 st.conf_rho = st.conf_rho * ell
                 st.conf_rho /= st.conf_rho.sum()
-                # confirmation no longer terminates; if NACK wins, drop the
-                # candidate's mass and return to message-matching mode.
                 if st.conf_rho[1] >= rn:
                     st.knockdown[st.conf_cand] *= (1 - rn) / rn
                     st.pi = st.pi * st.knockdown; st.pi /= st.pi.sum()
@@ -684,8 +614,6 @@ def run_watermarked_turn(prompt_ids, history_tokens, st, max_turn_tokens,
                     st.in_confirmation = False
                 continue
 
-            # R_t: synchronized, transcript-derived posterior-matching
-            # randomness Rand(Lambda_t^{(3)}), NOT a local np.random draw.
             _, _, R = side_info_for_step(key_ctx)
             u = posterior_match_symbol(st.pi, st.payload, R)
             x, blp = emit_token(probs, key_ctx, u)
@@ -702,7 +630,7 @@ def run_watermarked_turn(prompt_ids, history_tokens, st, max_turn_tokens,
 
             eff = st.pi * st.knockdown; eff = eff / eff.sum()
             if eff.max() >= g2:
-                crossed_g2 = True          # decorative: do NOT end the turn
+                crossed_g2 = True
             if eff.max() >= g1 and not st.in_confirmation:
                 crossed_g1 = True
                 cand = int(eff.argmax())
@@ -711,41 +639,37 @@ def run_watermarked_turn(prompt_ids, history_tokens, st, max_turn_tokens,
                 st.conf_true_bit = 0 if cand == st.payload else 1
                 st.conf_rho = np.array([0.5, 0.5])
 
-        # --- EOS (or cap): decide between decode, or confidence-gated spill ---
         eff = st.pi * st.knockdown
         eff = eff / eff.sum() if eff.sum() > 0 else np.ones(M) / M
-        # relevant belief: ACK-belief while confirming, else top-message belief
         if st.in_confirmation:
-            belief = float(st.conf_rho[0])     # rho_ACK
+            belief = float(st.conf_rho[0])
         else:
             belief = float(eff.max())
         hit_cap = (st.tokens_used >= MAX_PAYLOAD_TOKENS) and not res.ended_by_eos
 
-
         if (belief < SPILL_BELIEF_THR and st.n_spills < MAX_SPILLS
                 and res.ended_by_eos and not hit_cap):
             st.n_spills += 1
-            res.completed = False              # payload NOT resolved this turn
-            st.in_progress = True              # stays pending -> partner fillers
+            res.completed = False
+            st.in_progress = True
             res.outcome = "spill_lowconf"
             res.n_tokens = turn_tokens
             res.n_pad_tokens = 0
             return res
 
-        # Otherwise decode argmax (belief ok, or spill budget exhausted, or cap).
         res.completed = True
         res.decoder_decoded = int(eff.argmax())
         res.mis_ack = (res.decoder_decoded != st.payload)
         st.in_progress = False
         if not res.ended_by_eos:
-            res.outcome = "cap"                # hit token cap before EOS
+            res.outcome = "cap"
         elif st.n_spills >= MAX_SPILLS and belief < SPILL_BELIEF_THR:
-            res.outcome = "forced_maxspill"    # spill budget exhausted, low conf
+            res.outcome = "forced_maxspill"
         else:
             res.outcome = "eos_g2" if crossed_g2 else ("eos_g1" if crossed_g1
                                                        else "eos")
         res.n_tokens = turn_tokens
-        res.n_pad_tokens = 0       # no separate padding phase in EOS-decode model
+        res.n_pad_tokens = 0
         return res
     finally:
         lm.free()
@@ -823,9 +747,6 @@ def _resume_confirmation(st, history_tokens, res, lm, max_turn_tokens,
     return None
 
 
-# ============================================================================
-# Unwatermarked filler turn 
-# ============================================================================
 @torch.no_grad()
 def run_filler_turn(prompt_ids, history_tokens, max_filler_tokens):
     lm = IncrementalLM(list(prompt_ids))
@@ -867,9 +788,6 @@ def baseline_logprobs(prompt_ids, n_tokens):
         lm.free()
 
 
-# ============================================================================
-# Dialogue driver — now parameterized by (task_gen, profile)
-# ============================================================================
 def decode_turn_text(token_ids):
     return CTX.tokenizer.decode(token_ids, skip_special_tokens=True).strip()
 
@@ -893,16 +811,16 @@ def run_dialogue(rng, task_gen: TaskGen, profile: ConvProfile, seed=None):
     unfinished = 0
     wm_tokens_total = 0
     pad_tokens_total = 0
-    filler_tokens_total = 0       # tokens emitted on filler turns (wasted)
-    coded_bits_correct = 0.0     # sum of coded bits over CORRECTLY decoded payloads
-    coded_bits_attempted = 0.0   # sum over all completed payloads
+    filler_tokens_total = 0
+    coded_bits_correct = 0.0
+    coded_bits_attempted = 0.0
     wm_logprob_sum = 0.0
     wm_token_count = 0
-    entropy_sum = 0.0             # sum of per-step unwm entropy (bits)
-    entropy_count = 0            # number of watermarked emission steps
-    entropy_sum_early = 0.0      # sum over first 20 tokens of each turn
-    entropy_count_early = 0      # count over first 20 tokens of each turn
-    wm_turn_lengths = []         # carrier-token count per watermarked turn
+    entropy_sum = 0.0
+    entropy_count = 0
+    entropy_sum_early = 0.0
+    entropy_count_early = 0
+    wm_turn_lengths = []
     bl_logprob_sum = 0.0
     bl_token_count = 0
     filler_turns = 0
@@ -999,9 +917,8 @@ def run_dialogue(rng, task_gen: TaskGen, profile: ConvProfile, seed=None):
                   if wm_token_count > 0 else float("nan"))
     perplexity_baseline = (math.exp(-bl_logprob_sum / bl_token_count)
                            if bl_token_count > 0 else float("nan"))
-    total_tok = wm_tokens_total + pad_tokens_total + filler_tokens_total
+    total_tok = wm_tokens_total + pad_tokens_total
     bits_per_token = coded_bits_correct / max(total_tok, 1)
-    # pad_ratio now counts filler-turn tokens as wasted capacity alongside pad.
     wasted_tokens = pad_tokens_total + filler_tokens_total
     pad_ratio = wasted_tokens / max(wm_tokens_total, 1)
     avg_entropy = (entropy_sum / entropy_count) if entropy_count > 0 else float("nan")
@@ -1041,9 +958,6 @@ def run_dialogue(rng, task_gen: TaskGen, profile: ConvProfile, seed=None):
     }
 
 
-# ============================================================================
-# Per-cell run (one task x one conversation)
-# ============================================================================
 def run_cell(task_name, conv_name):
     task_gen = TASKS[task_name]()
     profile = CONVERSATIONS[conv_name]
@@ -1078,28 +992,16 @@ def run_cell(task_name, conv_name):
     agg_unf  = sum(d["unfinished"] for d in per_dialogue)
     agg_res  = sum(d["resumes"] for d in per_dialogue)
     agg_fill = sum(d["filler_turns"] for d in per_dialogue)
-    bits_per_token = agg_cbc / max(agg_wm + agg_pad + agg_fill_tok, 1)
+    bits_per_token = agg_cbc / max(agg_wm + agg_pad, 1)
     err_rate = agg_err / max(agg_cor + agg_err, 1)
-    # completion rate = fraction of DIALOGUES that are fully clean: every
-    # decoded message correct AND no payload left unfinished (a payload can now
-    # spill on the final round and never resolve). Distinct from err_rate, which
-    # is message-level over completed payloads only.
     n_dialogues = len(per_dialogue)
-    # dialogue-level error rate = fraction of dialogues containing >=1 wrong
-    # decoded message (i.e. 1 - completion rate). Unfinished payloads do not
-    # count against it; only actual decode errors do.
     dlg_with_error = sum(1 for d in per_dialogue if d["errors"] > 0)
     dialogue_err_rate = dlg_with_error / max(n_dialogues, 1)
-    # efficiency = fraction of ALL emitted tokens that carry payload (carriers).
-    # Under pure force-decode (no spill) every token is a carrier -> 1.0; with
-    # spill, filler turns carry nothing, so efficiency drops below 1.0.
-    payload_tokens = agg_wm                       # watermarked carrier tokens
-    all_emitted = agg_wm + agg_pad + agg_fill_tok  # carriers + pad + filler
+    payload_tokens = agg_wm
+    all_emitted = agg_wm + agg_pad + agg_fill_tok
     efficiency = payload_tokens / max(all_emitted, 1)
     avg_payloads = float(np.mean([d["completed_payloads"] for d in per_dialogue]))
 
-    # ---- Standard errors (std / sqrt(N)) across the N dialogues in this cell ----
-    # Each metric is computed per-dialogue, then SE = sample_std / sqrt(N).
     N = max(n_dialogues, 1)
     def _se(values):
         v = np.asarray(values, dtype=float)
@@ -1107,36 +1009,28 @@ def run_cell(task_name, conv_name):
         if len(v) < 2:
             return 0.0
         return float(np.std(v, ddof=1) / math.sqrt(len(v)))
-    # payloads/dialogue: per-dialogue completed count
     se_avg_payloads = _se([d["completed_payloads"] for d in per_dialogue])
-    # error rate: per-dialogue message-level error fraction
     per_dlg_err = [d["errors"] / max(d["correct"] + d["errors"], 1)
                    for d in per_dialogue]
     se_err_rate = _se(per_dlg_err)
-    # dialogue error rate: per-dialogue 0/1 indicator of "has >=1 error"
     per_dlg_has_error = [1.0 if d["errors"] > 0 else 0.0 for d in per_dialogue]
     se_dialogue_err_rate = _se(per_dlg_has_error)
-    # efficiency: per-dialogue carrier / all-emitted fraction
     per_dlg_eff = [d["wm_tokens_total"] /
                    max(d["wm_tokens_total"] + d["pad_tokens_total"]
                        + d["filler_tokens_total"], 1)
                    for d in per_dialogue]
     se_efficiency = _se(per_dlg_eff)
-    # bits/token: per-dialogue effective payload bits per emitted token
     se_bits_per_token = _se([d["bits_per_token"] for d in per_dialogue])
-    # token-weighted mean entropy across all watermarked emission steps in the cell
     ent_count = sum(d["entropy_count"] for d in per_dialogue)
     ent_weighted = sum(d["avg_entropy_bits"] * d["entropy_count"]
                        for d in per_dialogue
                        if not math.isnan(d["avg_entropy_bits"]))
     avg_entropy = (ent_weighted / ent_count) if ent_count > 0 else float("nan")
-    # same, restricted to first 20 tokens of each turn (early-token entropy)
     ent_count_e = sum(d["entropy_count_early"] for d in per_dialogue)
     ent_weighted_e = sum(d["avg_entropy_bits_early"] * d["entropy_count_early"]
                          for d in per_dialogue
                          if not math.isnan(d["avg_entropy_bits_early"]))
     avg_entropy_early = (ent_weighted_e / ent_count_e) if ent_count_e > 0 else float("nan")
-    # mean watermarked-turn length, weighted by number of such turns
     tl_vals = [d["avg_wm_turn_len"] for d in per_dialogue
                if not math.isnan(d["avg_wm_turn_len"])]
     avg_wm_turn_len = float(np.mean(tl_vals)) if tl_vals else float("nan")
@@ -1172,22 +1066,50 @@ def run_cell(task_name, conv_name):
         "per_dialogue": per_dialogue,
     }
 
-# ============================================================================
-# Run ALL models over the SAME dialogues (each: 3x3 task x conversation matrix)
-# ============================================================================
+
+TASK_ORDER = ["tictactoe", "chess", "go19"]
+CONV_ORDER = ["chat", "debate"]
+
+all_cells = {}
+for model_name in MODEL_NAMES:
+    log("\n" + "#" * 72)
+    log(f"# MODEL: {model_name}  (3x3 task x conversation matrix)")
+    log(f"#   tasks (coded bits): tictactoe~2.3  chess~5  go19~8.4")
+    log(f"#   convs (tok/turn):   chat~90  debate~300")
+    log(f"#   {N_DIALOGUES} dialogues x {ROUNDS_PER_DIALOGUE} rounds per cell")
+    log("#" * 72)
+    CTX = LMContext(model_name)
+    log(f"  (Laplace comm b={_B_LAPLACE:.4f} eps={EPS_NOISE}; "
+        f"conf p={P_CONF} b_conf={_B_CONF:.4f} eps_conf={EPS_CONF})")
+    try:
+        for task_name in TASK_ORDER:
+            for conv_name in CONV_ORDER:
+                cell = run_cell(task_name, conv_name)
+                all_cells[(task_name, conv_name)] = cell
+                d0 = cell["per_dialogue"][0]
+                log(f"    sample transcript (d1, first 4 turns):")
+                for turn in d0["history"][:5]:
+                    who = "A" if turn["agent"] == 0 else "B"
+                    text = " ".join(turn["content"].split())[:160]
+                    log(f"      [{who}] {text}")
+    finally:
+        CTX.teardown()
+        CTX = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 
 import json
 import html as _html
 
-TASK_ORDER = ["tictactoe", "chess", "go19"]          # low -> high coded bits
-CONV_ORDER = ["chat", "debate"]                      # short -> long turns
-
-# Which (conv, task) cells to feature in the rollout figure.
 FIG_CELLS = [
     ("chat",   "tictactoe"),
     ("debate", "chess"),
 ]
-FIG_N_ROLLOUTS = 3          # dialogues to show per cell
+FIG_N_ROLLOUTS = 3
+OUT_FIG_JSON = "rollouts.json"
+OUT_FIG_HTML = "rollouts_fig.html"
 
 
 def _payload_label(task_name, turn):
@@ -1248,12 +1170,9 @@ def build_rollout_records():
                         "payload_tokens_so_far": turn.get("payload_tokens_so_far", 0),
                     })
                     if completed:
-                        # carrier tokens / total emitted tokens this turn
                         rec["tok_ratio"] = (wm / total) if total > 0 else 0.0
                         rec["tok_use"] = f"{wm}/{total}"
                     else:
-                        # spilled / in-progress: no pad phase, all tokens are
-                        # carriers; payload continues on a later turn.
                         rec["tok_ratio"] = (wm / total) if total > 0 else 0.0
                         rec["tok_use"] = f"{wm}/{total}"
                 elif kind == "filler":
@@ -1358,8 +1277,6 @@ def render_rollouts_html(records):
                 f"</span></div>")
             parts.append("<div class='names'><span>Agent A</span>"
                          "<span>Agent B</span></div>")
-            # Single full-width stream in conversation order. Agent A bubbles
-            # align left, Agent B bubbles align right (chat-app style).
             for turn in roll["turns"]:
                 is_a = (turn["agent"] == 0)
                 side = "left" if is_a else "right"
@@ -1374,11 +1291,6 @@ def render_rollouts_html(records):
                     if turn.get("completed"):
                         ok = "✓" if turn.get("correct") else "✗"
                         resumed = "↪ " if turn.get("resumed") else ""
-                        # Which rule fired:
-                        #   converged before EOS (eos_g1/eos_g2) -> Change 1
-                        #     (early-stop removed; ran to EOS then decoded)
-                        #   not converged at EOS (eos/cap)        -> Change 2
-                        #     (forced decode at EOS)
                         oc = turn.get("outcome", "")
                         if oc in ("eos_g1", "eos_g2"):
                             rule = ("<span class='rule rule-c1'>"
@@ -1391,7 +1303,6 @@ def render_rollouts_html(records):
                                f"<span class='tok'>⛁ {tok} ({pct:.0f}%)</span>"
                                f"{rule}</div>")
                     else:
-                        # spilled: payload still transmitting, continues later
                         sofar = turn.get("payload_tokens_so_far", 0)
                         ann = (f"<div class='ann ann-spill'>"
                                f"<span class='msg'>↻ {msg} carrying…</span>"
@@ -1406,32 +1317,29 @@ def render_rollouts_html(records):
                     f"<div class='row {side}{filler}'><div class='wrap'>"
                     f"<div class='bub {bub_cls}'>{esc(turn['content'])}</div>"
                     f"{ann}</div></div>")
-            parts.append("</div>")  # panel
-        parts.append("</div>")  # rollouts
-        parts.append("</div>")  # cell
+            parts.append("</div>")
+        parts.append("</div>")
+        parts.append("</div>")
     parts.append("</body></html>")
     return "".join(parts)
 
-def write_rollouts(tag):
-    """Write the rollout figure JSON/HTML for the current model's `all_cells`."""
-    out_json = "rollouts_%s.json" % tag
-    out_html = "rollouts_%s.html" % tag
-    try:
-        _fig_records = build_rollout_records()
-        with open(out_json, "w") as f:
-            json.dump(_fig_records, f, indent=2, ensure_ascii=False)
-        with open(out_html, "w") as f:
-            f.write(render_rollouts_html(_fig_records))
-        n_found = {f"{r['conv']}-{r['task']}": len(r["rollouts"]) for r in _fig_records}
-        log(f"\nWrote {out_json} and {out_html}")
-        log(f"  rollouts found per cell (want {FIG_N_ROLLOUTS}): {n_found}")
-        for r in _fig_records:
-            if len(r["rollouts"]) < FIG_N_ROLLOUTS:
-                log(f"  WARNING: only {len(r['rollouts'])} all-correct dialogues for "
-                    f"{r['conv']}-{r['task']} (need {FIG_N_ROLLOUTS}); "
-                    f"increase N_DIALOGUES or relax the all-correct filter.")
-    except Exception as _e:
-        log(f"\n[rollout figure] skipped due to error: {_e}")
+
+try:
+    _fig_records = build_rollout_records()
+    with open(OUT_FIG_JSON, "w") as f:
+        json.dump(_fig_records, f, indent=2, ensure_ascii=False)
+    with open(OUT_FIG_HTML, "w") as f:
+        f.write(render_rollouts_html(_fig_records))
+    n_found = {f"{r['conv']}-{r['task']}": len(r["rollouts"]) for r in _fig_records}
+    log(f"\nWrote {OUT_FIG_JSON} and {OUT_FIG_HTML}")
+    log(f"  rollouts found per cell (want {FIG_N_ROLLOUTS}): {n_found}")
+    for r in _fig_records:
+        if len(r["rollouts"]) < FIG_N_ROLLOUTS:
+            log(f"  WARNING: only {len(r['rollouts'])} all-correct dialogues for "
+                f"{r['conv']}-{r['task']} (need {FIG_N_ROLLOUTS}); "
+                f"increase N_DIALOGUES or relax the all-correct filter.")
+except Exception as _e:
+    log(f"\n[rollout figure] skipped due to error: {_e}")
 
 
 def print_matrix(title, key, fmt="{:>8.4f}", se_key=None):
@@ -1450,186 +1358,92 @@ def print_matrix(title, key, fmt="{:>8.4f}", se_key=None):
                 row += fmt.format(cell[key]).rjust(18)
         log(row)
 
-# ---- Shared CSV schema (identical fields to the single-model script) ----
-_CSV_HEADER = (
-    "task,conv,max_turn_tokens,avg_payloads_per_dialogue,se_avg_payloads,"
-    "bits_per_token,se_bits_per_token,"
-    "dialogue_err_rate,se_dialogue_err_rate,efficiency,se_efficiency,"
-    "dialogues_with_error,n_dialogues,"
-    "filler_turns,filler_tokens_total,"
-    "correct,errors,err_rate,se_err_rate,wm_tokens_total,pad_tokens_total,"
-    "coded_bits_correct,avg_wm_turn_len,avg_entropy_bits,"
-    "perplexity_wm,perplexity_baseline\n"
-)
-
-
-def _csv_row(s):
-    return (f"{s['task']},{s['conv']},{s['max_turn_tokens']},"
-            f"{s['avg_payloads_per_dialogue']:.4f},{s['se_avg_payloads']:.4f},"
-            f"{s['bits_per_token']:.6f},{s['se_bits_per_token']:.6f},"
-            f"{s['dialogue_err_rate']:.4f},{s['se_dialogue_err_rate']:.4f},"
-            f"{s['efficiency']:.4f},{s['se_efficiency']:.4f},"
-            f"{s['dialogues_with_error']},"
-            f"{s['n_dialogues']},"
-            f"{s['filler_turns']},{s['filler_tokens_total']},"
-            f"{s['correct']},{s['errors']},{s['err_rate']:.6f},"
-            f"{s['se_err_rate']:.6f},"
-            f"{s['wm_tokens_total']},{s['pad_tokens_total']},"
-            f"{s['coded_bits_correct']:.4f},"
-            f"{s['avg_wm_turn_len']:.4f},{s['avg_entropy_bits']:.4f},"
-            f"{s['perplexity']:.4f},{s['perplexity_baseline']:.4f}\n")
-
-
-def write_combined_csv(all_results, path="turnbased_bam_matrix_all.csv"):
-    """One long-format CSV across all models (leading `model` column)."""
-    with open(path, "w") as f:
-        f.write("model," + _CSV_HEADER)
-        for model_name in MODEL_NAMES:
-            cells = all_results.get(model_name, {})
-            tag = MODEL_TAGS.get(model_name, _slug(model_name))
-            for t in TASK_ORDER:
-                for c in CONV_ORDER:
-                    s = cells.get((t, c))
-                    if s is not None:
-                        f.write(f"{tag}," + _csv_row(s))
-    log(f"\nWrote {path}")
-
-
-def _slug(model_name):
-    return (model_name.split("/")[-1]
-            .replace(".", "").replace("-", "").lower())
-
-
-def report_model(tag, model_name):
-    """Console matrices + per-model CSV + per-model heatmap for `all_cells`."""
-    log("\n" + "=" * 80)
-    log(f"3x3 MATRIX RESULTS  [{model_name}]  (rows: coded bits low->high; "
-        f"cols: turn length short->long)")
-    log("  values shown as mean+/-SE  (SE = std across dialogues / sqrt(N))")
-    log("=" * 80)
-    print_matrix("BITS PER TOKEN  (higher = better channel utilization)",
-                 "bits_per_token", "{:>7.4f}", se_key="se_bits_per_token")
-    print_matrix("ERR RATE  (message-level: fraction of decoded messages that are wrong)",
-                 "err_rate", "{:>7.4f}", se_key="se_err_rate")
-    print_matrix("DIALOGUE ERR RATE  (fraction of dialogues with >=1 wrong message; = 1 - completion rate)",
-                 "dialogue_err_rate", "{:>6.4f}", se_key="se_dialogue_err_rate")
-    print_matrix("EFFICIENCY  (fraction of emitted tokens that carry payload; 1.0 = no filler/pad waste)",
-                 "efficiency", "{:>6.4f}", se_key="se_efficiency")
-    print_matrix("AVG PAYLOADS / DIALOGUE",
-                 "avg_payloads_per_dialogue", "{:>6.2f}", se_key="se_avg_payloads")
-
-    # Per-conversation-setting summary: avg token length + avg unwm entropy.
-    log("\n" + "-" * 80)
-    log("PER-CONVERSATION SUMMARY  (avg watermarked-turn length; avg "
-        "unwatermarked next-token entropy)")
-    log("-" * 80)
-    log(f"{'conv':<16}{'max_turn':>10}{'avg_tok_len':>14}"
-        f"{'entropy_all':>16}{'entropy_early':>16}")
-    for c in CONV_ORDER:
-        cells = [all_cells[(t, c)] for t in TASK_ORDER]
-        ent_n = sum(cl["entropy_count"] for cl in cells)
-        ent_w = sum(cl["avg_entropy_bits"] * cl["entropy_count"]
-                    for cl in cells if not math.isnan(cl["avg_entropy_bits"]))
-        conv_entropy = (ent_w / ent_n) if ent_n > 0 else float("nan")
-        ent_ne = sum(cl["entropy_count_early"] for cl in cells)
-        ent_we = sum(cl["avg_entropy_bits_early"] * cl["entropy_count_early"]
-                     for cl in cells if not math.isnan(cl["avg_entropy_bits_early"]))
-        conv_entropy_early = (ent_we / ent_ne) if ent_ne > 0 else float("nan")
-        tl = [cl["avg_wm_turn_len"] for cl in cells
-              if not math.isnan(cl["avg_wm_turn_len"])]
-        conv_tok_len = float(np.mean(tl)) if tl else float("nan")
-        log(f"{c:<16}{CONVERSATIONS[c].max_turn_tokens:>10}"
-            f"{conv_tok_len:>14.1f}{conv_entropy:>16.3f}{conv_entropy_early:>16.3f}")
-
-    out_csv = "turnbased_bam_matrix_%s.csv" % tag
-    with open(out_csv, "w") as f:
-        f.write(_CSV_HEADER)
-        for t in TASK_ORDER:
-            for c in CONV_ORDER:
-                f.write(_csv_row(all_cells[(t, c)]))
-    log(f"\nWrote {out_csv}")
-
-    # Heatmap of bits/token (tasks x conversations; grid is 3x2, not square).
-    B = np.array([[all_cells[(t, c)]["bits_per_token"] for c in CONV_ORDER]
-                  for t in TASK_ORDER])
-    fig, ax = plt.subplots(figsize=(7, 6))
-    im = ax.imshow(B, cmap="viridis", aspect="auto")
-    ax.set_xticks(range(len(CONV_ORDER)))
-    ax.set_xticklabels([f"{c}\n(~{CONVERSATIONS[c].max_turn_tokens}tok)"
-                        for c in CONV_ORDER])
-    ax.set_yticks(range(len(TASK_ORDER)))
-    ax.set_yticklabels([f"{t}\n(~{b}b)"
-                        for t, b in zip(TASK_ORDER, ["2.3", "5", "8.4"])])
-    ax.set_xlabel("conversation type (turn length ->)")
-    ax.set_ylabel("embedding task (coded bits ->)")
-    ax.set_title(f"Effective payload bits per emitted token\n{model_name}")
-    for i in range(B.shape[0]):
-        for j in range(B.shape[1]):
-            ax.text(j, i, f"{B[i, j]:.3f}", ha="center", va="center",
-                    color="white" if B[i, j] < B.max() * 0.6 else "black")
-    fig.colorbar(im, ax=ax, label="bits / token")
-    out_plot = "turnbased_bam_matrix_%s.png" % tag
-    plt.tight_layout(); plt.savefig(out_plot, dpi=140); plt.close(fig)
-    log(f"Wrote {out_plot}")
-
-
-# ---------------------------------------------------------------------------
-# Main loop: one model resident at a time; identical dialogues across models.
-# ---------------------------------------------------------------------------
-ALL_RESULTS = {}
-for model_name in MODEL_NAMES:
-    tag = MODEL_TAGS.get(model_name, _slug(model_name))
-    log("\n" + "#" * 72)
-    log(f"# MODEL: {model_name}  ->  tag={tag}")
-    log(f"#   tasks (coded bits): tictactoe~2.3  chess~5  go19~8.4")
-    log(f"#   convs (tok/turn):   chat~90  debate~300")
-    log(f"#   {N_DIALOGUES} dialogues x {ROUNDS_PER_DIALOGUE} rounds per cell")
-    log(f"#   dialogues shared across models (seeded by index 70000+di only)")
-    log("#" * 72)
-    CTX = LMContext(model_name)          # module global; run_cell/run_dialogue use it
-    all_cells = {}                       # module global; reset per model
-    log(f"  (Laplace comm b={_B_LAPLACE:.4f} eps={EPS_NOISE}; "
-        f"conf p={P_CONF} b_conf={_B_CONF:.4f} eps_conf={EPS_CONF})")
-    try:
-        for task_name in TASK_ORDER:
-            for conv_name in CONV_ORDER:
-                cell = run_cell(task_name, conv_name)
-                all_cells[(task_name, conv_name)] = cell
-                d0 = cell["per_dialogue"][0]
-                log(f"    sample transcript (d1, first 4 turns):")
-                for turn in d0["history"][:5]:
-                    who = "A" if turn["agent"] == 0 else "B"
-                    text = " ".join(turn["content"].split())[:160]
-                    log(f"      [{who}] {text}")
-        write_rollouts(tag)              # build_rollout_records reads all_cells
-    finally:
-        CTX.teardown()
-        CTX = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    report_model(tag, model_name)        # matrices + per-model CSV + heatmap
-    ALL_RESULTS[model_name] = dict(all_cells)
-
-# Combined long-format CSV across all models.
-write_combined_csv(ALL_RESULTS)
-
-# Compact cross-model comparison (bits/token and message err_rate per cell).
 log("\n" + "=" * 80)
-log("CROSS-MODEL COMPARISON  (paired dialogues; same scenarios/payloads per cell)")
+log("3x3 MATRIX RESULTS  (rows: coded bits low->high; cols: turn length short->long)")
+log("  values shown as mean±SE  (SE = std across dialogues / sqrt(N))")
 log("=" * 80)
-for t in TASK_ORDER:
-    for c in CONV_ORDER:
-        log(f"\n  {t} x {c}:")
-        for model_name in MODEL_NAMES:
-            s = ALL_RESULTS.get(model_name, {}).get((t, c))
-            if s is None:
-                continue
-            tag = MODEL_TAGS.get(model_name, _slug(model_name))
-            log(f"    {tag:<10} bits/tok={s['bits_per_token']:.4f}"
-                f"+/-{s['se_bits_per_token']:.4f}   "
-                f"msg_err={s['err_rate']:.4f}+/-{s['se_err_rate']:.4f}   "
-                f"eff={s['efficiency']:.3f}   "
-                f"avg_payload={s['avg_payloads_per_dialogue']:.2f}")
-log("\nDone: all models complete.")
+print_matrix("BITS PER TOKEN  (higher = better channel utilization; diagonal should peak)",
+             "bits_per_token", "{:>7.4f}", se_key="se_bits_per_token")
+print_matrix("ERR RATE  (message-level: fraction of decoded messages that are wrong)",
+             "err_rate", "{:>7.4f}", se_key="se_err_rate")
+print_matrix("DIALOGUE ERR RATE  (dialogue-level: fraction of dialogues containing >=1 wrong message; = 1 - completion rate)",
+             "dialogue_err_rate", "{:>6.4f}", se_key="se_dialogue_err_rate")
+print_matrix("EFFICIENCY  (fraction of emitted tokens that carry payload; 1.0 = no filler/pad waste)",
+             "efficiency", "{:>6.4f}", se_key="se_efficiency")
+print_matrix("AVG PAYLOADS / DIALOGUE",
+             "avg_payloads_per_dialogue", "{:>6.2f}", se_key="se_avg_payloads")
+
+log("\n" + "-" * 80)
+log("PER-CONVERSATION SUMMARY  (avg watermarked-turn length; avg unwatermarked "
+    "next-token entropy)")
+log("  entropy_all = mean over ALL tokens in a turn; entropy_early = mean over")
+log("  the FIRST 20 tokens only. If early >> all, the low all-token average is a")
+log("  within-turn decay artifact of long turns, not a topic/repetition problem.")
+log("-" * 80)
+log(f"{'conv':<16}{'max_turn':>10}{'avg_tok_len':>14}"
+    f"{'entropy_all':>16}{'entropy_early':>16}")
+conv_summary = {}
+for c in CONV_ORDER:
+    cells = [all_cells[(t, c)] for t in TASK_ORDER]
+    ent_n = sum(cl["entropy_count"] for cl in cells)
+    ent_w = sum(cl["avg_entropy_bits"] * cl["entropy_count"]
+                for cl in cells if not math.isnan(cl["avg_entropy_bits"]))
+    conv_entropy = (ent_w / ent_n) if ent_n > 0 else float("nan")
+    ent_ne = sum(cl["entropy_count_early"] for cl in cells)
+    ent_we = sum(cl["avg_entropy_bits_early"] * cl["entropy_count_early"]
+                 for cl in cells if not math.isnan(cl["avg_entropy_bits_early"]))
+    conv_entropy_early = (ent_we / ent_ne) if ent_ne > 0 else float("nan")
+    tl = [cl["avg_wm_turn_len"] for cl in cells
+          if not math.isnan(cl["avg_wm_turn_len"])]
+    conv_tok_len = float(np.mean(tl)) if tl else float("nan")
+    conv_summary[c] = (conv_tok_len, conv_entropy)
+    log(f"{c:<16}{CONVERSATIONS[c].max_turn_tokens:>10}"
+        f"{conv_tok_len:>14.1f}{conv_entropy:>16.3f}{conv_entropy_early:>16.3f}")
+
+with open(OUT_CSV, "w") as f:
+    f.write("task,conv,max_turn_tokens,avg_payloads_per_dialogue,se_avg_payloads,"
+            "bits_per_token,se_bits_per_token,"
+            "dialogue_err_rate,se_dialogue_err_rate,efficiency,se_efficiency,"
+            "dialogues_with_error,n_dialogues,"
+            "filler_turns,filler_tokens_total,"
+            "correct,errors,err_rate,se_err_rate,wm_tokens_total,pad_tokens_total,"
+            "coded_bits_correct,avg_wm_turn_len,avg_entropy_bits,"
+            "perplexity_wm,perplexity_baseline\n")
+    for t in TASK_ORDER:
+        for c in CONV_ORDER:
+            s = all_cells[(t, c)]
+            f.write(f"{t},{c},{s['max_turn_tokens']},"
+                    f"{s['avg_payloads_per_dialogue']:.4f},{s['se_avg_payloads']:.4f},"
+                    f"{s['bits_per_token']:.6f},{s['se_bits_per_token']:.6f},"
+                    f"{s['dialogue_err_rate']:.4f},{s['se_dialogue_err_rate']:.4f},"
+                    f"{s['efficiency']:.4f},{s['se_efficiency']:.4f},"
+                    f"{s['dialogues_with_error']},"
+                    f"{s['n_dialogues']},"
+                    f"{s['filler_turns']},{s['filler_tokens_total']},"
+                    f"{s['correct']},{s['errors']},{s['err_rate']:.6f},"
+                    f"{s['se_err_rate']:.6f},"
+                    f"{s['wm_tokens_total']},{s['pad_tokens_total']},"
+                    f"{s['coded_bits_correct']:.4f},"
+                    f"{s['avg_wm_turn_len']:.4f},{s['avg_entropy_bits']:.4f},"
+                    f"{s['perplexity']:.4f},{s['perplexity_baseline']:.4f}\n")
+log(f"\nWrote {OUT_CSV}")
+
+B = np.array([[all_cells[(t, c)]["bits_per_token"] for c in CONV_ORDER]
+              for t in TASK_ORDER])
+fig, ax = plt.subplots(figsize=(7, 6))
+im = ax.imshow(B, cmap="viridis", aspect="auto")
+ax.set_xticks(range(len(CONV_ORDER))); ax.set_xticklabels([f"{c}\n(~{CONVERSATIONS[c].max_turn_tokens}tok)"
+                                             for c in CONV_ORDER])
+ax.set_yticks(range(len(TASK_ORDER))); ax.set_yticklabels(
+    [f"{t}\n(~{b}b)" for t, b in zip(TASK_ORDER, ["2.3", "5", "8.4"])])
+ax.set_xlabel("conversation type (turn length →)")
+ax.set_ylabel("embedding task (coded bits →)")
+ax.set_title("Effective payload bits per emitted token")
+for i in range(B.shape[0]):
+    for j in range(B.shape[1]):
+        ax.text(j, i, f"{B[i, j]:.3f}", ha="center", va="center",
+                color="white" if B[i, j] < B.max() * 0.6 else "black")
+fig.colorbar(im, ax=ax, label="bits / token")
+plt.tight_layout(); plt.savefig(OUT_PLOT, dpi=140)
+log(f"Wrote {OUT_PLOT}")
+log("Done.")

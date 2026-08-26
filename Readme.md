@@ -1,4 +1,4 @@
-# Artifact: Feedback Coding Enables Inference-Time Steganographic Agentic Communication
+# Artifact: Feedback Coding Enables Inference-Time Covert Agentic Communication
 
 This repository contains the evaluation code for the paper. It reproduces the
 continuous-text primitive experiments (rate–reliability, text quality, runtime,
@@ -30,10 +30,10 @@ multi-bit watermarking baselines (Arcmark, MPAC, BiMark, StealthInk).
     ├── Ablation.py               # confirmation-phase ablation     -> Fig 3 (App. C.2)
     ├── Ablation_packetization.py # packetization + runtime         -> Table 3 (App. C.1)
     ├── KeyKL.py                  # seed-marginalized per-token KL  -> Fig 4 (Sec 5.2 / App. E)
-    ├── Turn_based_bam_allmodels.py       # covert agentic conversation  -> Tables 2 & 4, Fig 6
+    ├── Turn_based_bam_allmodels.py       # covert agentic conversation  -> Tables 2 & 4, Fig 6 (include     three model-separated files)
     ├── Generate_Turn_based_transcript.py # paired stego/clean transcripts for the judge
     └── eval_pipeline.py          # blind + judge + score quality   -> quality (w/t/l) columns, Fig 7    
-└── data/
+└── data/                         
 
 ```
 ### Files not displayed above but included in the repo
@@ -69,7 +69,7 @@ device is visible. See `ENVIRONMENT.md` for the reference hardware.
 
 | Paper artifact                                   | Script                              | Output files |
 |--------------------------------------------------|-------------------------------------|--------------|
-| Fig 2, Table 1 (C4: reliability/rate/quality/time) | `compare.py`                      | `comparison_c4.{png,csv}`, `comparison_c4_perplexity.png`, `judge_pairs_*.jsonl` |
+| Fig 2, Table 1 (C4: reliability/rate/quality/time) | `compare.py`                      | `comparison_c4.{png,csv}`, `comparison_c4_perplexity.png` |
 | Fig 3 (ablation, App. C.2)                        | `Ablation.py`                       | `ablation_confirmation.{png,csv}`, `ablation_confirmation_frontier.{png,pdf}` |
 | Table 3 (packetization + runtime, App. C.1)       | `Ablation_packetization.py`         | `ablation_packetization.{png,csv}` |
 | Fig 4 (per-token KL security, Sec 5.2 / App. E)   | `KeyKL.py`                          | `kl_security_c4*.{png,csv}` |
@@ -156,6 +156,12 @@ embedding):
 MAIN_SCRIPT=Turn_based_bam_allmodels.py TASK=chess N_PAIRS=100 \
   python Generate_Turn_based_transcript.py          # -> transcripts_chess.json
 ```
+Additionally, one may use 
+```bash
+MAIN_SCRIPT=Turn_based_bam_phi4_14b.py TASK=chess N_PAIRS=100 \
+  python Generate_Turn_based_transcript_phi.py          # -> transcripts_chess.json
+```
+to generate json files containing only transcripts produced by specified model.
 
 Then blind, judge, and score against the answer key (resumable; the judge never
 sees the answer key):

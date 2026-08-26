@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-Runs the BAM dialogue driver defined in Turn_based_bam_RandomTopic.py over the
-CHESS embedding task and the two conversation settings (chat, debate).
 For each of N pairs per setting it produces:
   * a watermarked dialogue (payload embedded via BAM), and
   * a clean dialogue (identical topic/opener seed + identical RNG seed, ordinary

@@ -56,12 +56,9 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 SMOKE_TEST = False
 
-# ── How much text to characterise ───────────────────────────────────────────
-N_PROMPTS_EVAL = 3 if not SMOKE_TEST else 3     # prompts (independent runs)
+N_PROMPTS_EVAL = 50 if not SMOKE_TEST else 3     # prompts (independent runs)
 
-# Horizon sweep. We WALK the longest horizon once per run and SLICE the shorter
-# cutoffs from it (free: shared prefix trajectory). GEN_TOKENS_MAX drives the
-# actual walk length; HORIZON_SWEEP are the reporting/plotting cutoffs.
+# Horizon sweep. 
 HORIZON_SWEEP  = [50, 100, 150, 200] if not SMOKE_TEST else [4, 8]
 GEN_TOKENS_MAX = max(HORIZON_SWEEP)
 GEN_TOKENS     = GEN_TOKENS_MAX                  # positions scored per run
@@ -87,13 +84,7 @@ SINKHORN_MAX_ITER  = 4000
 SINKHORN_STOP_THR  = 1e-4
 
 # ── Batched-solver speedup switches ─────────────────────────────────────────
-# USE_BATCHED: run all Nseed OT solves for a position as ONE batched log-domain
-#   Sinkhorn on GPU (levers 2+3+4). Falls back to the per-seed path if False.
-# BATCHED_MAX_ITER: cut from SINKHORN_MAX_ITER (lever 1). 500 is plenty for a
-#   top-50 support; verify once against 4000 before trusting.
-# VERIFY_BATCHED: if True, at the FIRST few positions of the FIRST run, compute
-#   the seed-marginal KL by BOTH paths and assert agreement, then continue with
-#   the batched path. This is the correctness gate before large Nseed.
+
 USE_BATCHED        = True
 BATCHED_MAX_ITER   = 500
 BATCHED_STOP_THR   = 1e-4

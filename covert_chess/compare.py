@@ -1,26 +1,6 @@
 """
 compare.py — Burnashev-ArcMark (BAM) vs Fixed-Length ArcMark vs open-source
 multi-bit baselines (MPAC, BiMark, StealthInk) on C4 RealNews.
-
-Changes vs previous revision:
-  * NEW BASELINES: MPAC (Yoo et al., NAACL 2024), BiMark (Feng et al., ICML
-    2025), and StealthInk (Jiang et al., ICML 2025), all run at the same
-    fixed lengths as Fixed-Length ArcMark (FIXED_NS = 20..60), 8-bit payload,
-    C4 prompts, same seeds/prompt pairing. Implementations are vendored
-    verbatim from the official repos under ./baselines/ (see its __init__.py
-    for provenance); each scheme keeps its OWN hashing/decoding machinery.
-  * TIMING: per-trial wall-clock (perf_counter + cuda.synchronize) split into
-    gen_sec (watermarked generation only) and dec_sec (decode only). Reported
-    as sec/token for generation. Teacher-forced PPL scoring and the
-    length-matched base generation are excluded from both. The base
-    generation itself is timed separately (base_sec_tok) as the no-embedding
-    reference. BAM's decode is integrated into its interactive loop, so its
-    dec_sec is 0 by construction (noted in the CSV).
-  * REMOVED: the TF-IDF steganalysis-F1 detector (metric discarded).
-
-Confirmation phase (unchanged): the 1-bit ACK/NACK confirmation is a genuine
-2-symbol ANTIPODAL channel with its own clean 2-hypothesis likelihood and its
-own noise floor EPS_CONF.
 """
 
 from __future__ import annotations
@@ -86,6 +66,7 @@ FIXED_NS = [20, 30, 40, 50, 60] if not SMOKE_TEST else [32]
 # Fixed across the sweep: gamma=0.5, rho_NACK=0.75, (eps, eps_ACK)=(0.4, 0.4),
 # T*=MAX_TOKENS=1000. Only rho_ACK varies, tied to L via rho_ACK = 1 - 1/L,
 # i.e. BAM(0.5, 1 - L^{-1}, 0.75, (0.4, 0.4), 1000) for each L below.
+# 2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 32768,
 L_VALUES = (
     [2, 4, 8, 16, 32, 64, 128, 512, 2048, 8192, 32768, 32768*4]
     if not SMOKE_TEST else [8]
@@ -116,18 +97,14 @@ OUT_PPL_PLOT = "comparison_c4_perplexity.png"
 # Saving every setting would be wasteful: the text is free to capture during the
 # sweep, but each saved pair is a future judge API call, so we keep it lean.
 DUMP_JUDGE_TEXT = True
-DUMP_SCHEME     = "BAM-L32768"            # only this scheme's pairs are saved
-N_DUMP          = 100                     # cap on saved pairs (not all N_TRIALS)
+DUMP_SCHEME     = "BAM-L32768"           
+N_DUMP          = 100                
 OUT_JUDGE_JSONL = "judge_pairs_BAM-L32768.jsonl"
 
 # ── Shared ArcMark core knobs ───────────────────────────────────────────────
 P_FIELD            = 4
 R_RESOLUTION       = 4
-# 128-bit shared seed (lambda = 128). The key schedule in side_info.py now
-# encodes the seed as 16 little-endian bytes, so the full 128 bits flow into
-# the SHA-256 that derives (s_index, perm_seed, R_t). The previous value
-# (0xA12C, 16 bits) combined with a signed-int64 packing capped the realized
-# seed entropy far below the lambda = 128 claimed in the paper.
+
 SHARED_SEED        = 0x9E3779B97F4A7C15F39CC0605CEDC834
 TOP_K              = 50
 SINKHORN_REG       = 0.2
@@ -240,8 +217,6 @@ class TopKTruncationProcessor:
     candidate set as the shared top-50 base reference, and StealthInk's
     unbiasedness guarantee (which holds for any input distribution) becomes
     "unbiased w.r.t. top-50 sampling" -- matching ArcMark/BiMark's support.
-    NOTE: truncating AFTER the watermark processor would instead re-distort
-    the watermarked distribution, so order matters.
     """
 
     def __init__(self, k: int):
@@ -285,7 +260,17 @@ class LMContext:
         self.model.eval()
         self.vocab_size = self.model.config.vocab_size
         if getattr(self.model, "generation_config", None) is not None:
-            self.model.generation_config.max_length = None
+            gcfg = self.model.generation_config
+            gcfg.max_length = None
+            log(f"  hub generation_config: temperature={gcfg.temperature} "
+                f"top_p={gcfg.top_p} top_k={gcfg.top_k} "
+                f"do_sample={gcfg.do_sample}")
+            gcfg.temperature = None
+            gcfg.top_p = None
+            gcfg.top_k = None
+            gcfg.typical_p = None
+            gcfg.epsilon_cutoff = None
+            gcfg.eta_cutoff = None
         self.perm_cache: dict[int, torch.Tensor] = {}
         self.code_cache: dict[int, RandomLinearCode] = {}
         self.prompt_pool: list[list[int]] = []
@@ -476,14 +461,6 @@ def _context_tokens_for_step(emitted: list[int], context_width: int) -> tuple[in
 def side_info_for_step(emitted: list[int]) -> tuple[int, int, float]:
     """Derive the synchronized per-token side information (s_index, perm_seed,
     R_t) for the NEXT token, from the current transcript context.
-
-    This is the KeyGen of the paper's Eq. (key-generation): a single keyed
-    SHA-256 over (secret || context) split into three disjoint blocks giving
-    the channel index k_t^{(1)} (s_index), the vocabulary-permutation seed
-    Lambda_t^{(2)} (perm_seed), and the posterior-matching randomness
-    R_t = Rand(Lambda_t^{(3)}). Because it is derived from the shared seed and
-    the shared transcript, both encoder and decoder reconstruct the identical
-    R_t; there is no unsynchronized local randomness.
     """
     context_tokens = _context_tokens_for_step(emitted, ARC_CONFIG.context_width)
     s_index, perm_seed, R_t = compute_key_si(
@@ -612,15 +589,13 @@ def message_likelihood(ells: np.ndarray, pi: np.ndarray) -> np.ndarray:
 # ============================================================================
 # CONFIRMATION phase — Algorithm 1 (posterior matching) instantiated at p = 2
 # ============================================================================
-# Faithful to the paper: the confirmation phase is NOT a bespoke channel; it is
-# the SAME posterior-matching machinery run with alphabet size p = 2. The two
-# antipodal confirmation symbols are u_ACK = 0 (angle 0) and u_NACK = 1
+# The two antipodal confirmation symbols are u_ACK = 0 (angle 0) and u_NACK = 1
 # (angle pi at p = 2). The candidate-correct case transmits u_ACK, otherwise
 # u_NACK; the belief rho over {u_ACK, u_NACK} is updated with the SAME
 # contaminated-Laplace likelihood (eq:mixture-likelihood) evaluated at p = 2,
 # with its own contamination floor eps_ACK (EPS_CONF) and its own Laplace scale
-# b = pi / (p * sqrt(2)) at p = 2 (paper: b = pi / (p sqrt 2)).
-P_CONF = 2                       # confirmation alphabet size (paper: p = 2)
+# b = pi / (p * sqrt(2)) at p = 2 (b = pi / (p sqrt 2)).
+P_CONF = 2                       # confirmation alphabet size (p = 2)
 SYM_ACK  = 0                     # u_ACK  -> angle 2*pi*0/2 = 0
 SYM_NACK = 1                     # u_NACK -> angle 2*pi*1/2 = pi
 
@@ -677,14 +652,7 @@ def run_confirmation(true_bit, emitted, lm: "IncrementalLM", max_steps,
     angle pi at p = 2) through a genuine p = 2 ArcMark OT channel. The shared
     belief rho = [P(u_ACK), P(u_NACK)] is updated with the SAME
     contaminated-Laplace likelihood as the communication phase, evaluated at
-    p = 2 with floor eps_ACK (EPS_CONF). This mirrors 'apply Algorithm 1 with
-    p = 2' from the paper. Stopping: accept (u_ACK) when rho[0] >= g_ack,
-    reject (u_NACK) when rho[1] >= g_nack.
-
-    With a degenerate 2-point belief the posterior-matching inverse-CDF map
-    reduces to transmitting the fixed antipodal symbol selected by true_bit, so
-    the symbol is emitted directly; the mechanism is otherwise identical to
-    Algorithm 1 at p = 2.
+    p = 2 with floor eps_ACK (EPS_CONF).
     """
     tx_symbol = SYM_ACK if true_bit == 0 else SYM_NACK
     rho = np.array([0.5, 0.5])
@@ -747,10 +715,6 @@ def get_code(n_tokens: int) -> RandomLinearCode:
     cache = CTX.code_cache
     code = cache.get(n_tokens)
     if code is None:
-        # RandomLinearCode.build seeds a torch.Generator, which requires a
-        # value fitting in int64. The linear-code seed only needs to be
-        # deterministic and shared (it is not the cryptographic seed), so we
-        # fold the 128-bit SHARED_SEED down to 63 bits.
         code_seed = (SHARED_SEED + 42) & ((1 << 63) - 1)
         code = RandomLinearCode.build(
             num_messages=M_MSG,
@@ -845,12 +809,7 @@ def fixed_length_trial(prompt_ids, payload_int, n_tokens):
 # ============================================================================
 # Baseline trials: MPAC, BiMark, StealthInk
 # ============================================================================
-# Shared trial contract (same as fixed_length_trial):
-#   (prompt_ids, payload_int, n_tokens) ->
-#   (ok, n_used, ber, decoded, gen_ids, base_logps, gen_sec, dec_sec)
-# Each scheme embeds the K_BITS-bit payload with its OWN machinery and decodes
-# with its OWN detector; base_logps is the same teacher-forced scoring under
-# the unmodified base model as used for ArcMark (for perplexity).
+
 
 @torch.no_grad()
 def mpac_trial(prompt_ids, payload_int, n_tokens):
@@ -865,7 +824,7 @@ def mpac_trial(prompt_ids, payload_int, n_tokens):
         seeding_scheme=MPAC_SEEDING,
         base=MPAC_RADIX,
         message_length=K_BITS,
-        code_length=K_BITS,      # == message_length: plain payload, no ECC
+        code_length=K_BITS,      
         device=model.device,
     )
     proc.set_message(binary_msg)
@@ -879,15 +838,11 @@ def mpac_trial(prompt_ids, payload_int, n_tokens):
             do_sample=True,
             temperature=1.0,
             top_k=0,             # truncation handled by the processor below
+            top_p=1.0,           
             min_new_tokens=n_tokens,
             max_new_tokens=n_tokens,
             eos_token_id=None,
             pad_token_id=tokenizer.pad_token_id,
-            # Truncate-first, then bias: MPAC operates on the same top-50
-            # candidate set as the shared no-embedding base reference, so its
-            # delta-PPL isolates the bias distortion rather than full-vocab
-            # tail sampling. (Deviation from the released pipeline, which
-            # samples the biased full-vocab distribution.)
             logits_processor=[TopKTruncationProcessor(TOP_K), proc],
         )
     gen_ids = output[0, len(prompt_ids):].detach().cpu().tolist()
@@ -951,7 +906,8 @@ def bimark_trial(prompt_ids, payload_int, n_tokens):
             attention_mask=torch.ones_like(inputs),
             do_sample=True,
             temperature=1.0,
-            top_k=0,             # processor already restricts to its top-50
+            top_k=0,             
+            top_p=1.0,           
             min_new_tokens=n_tokens,
             max_new_tokens=n_tokens,
             eos_token_id=None,
@@ -972,8 +928,7 @@ def bimark_trial(prompt_ids, payload_int, n_tokens):
                 BIMARK_C_KEY, BIMARK_BIT_IDX_KEY,
                 bits, stride=max(1, len(gen_ids)),
             )
-    # The last stride bucket accumulates the full sequence; ties decode to 'x'
-    # and count as wrong under BiMark's own `hit` accounting.
+
     ok = (hit[-1] == K_BITS)
     ber = 1.0 - float(hit_rate[-1])
     decoded_bits = decode_bits[-1].replace("x", "0")   # for logging only
@@ -999,9 +954,7 @@ def stealthink_trial(prompt_ids, payload_int, n_tokens, trial_seed):
         for p in range(converted_msg_length)
     ]
 
-    # NOTE: vocab must span the model's LOGITS dimension (CTX.vocab_size), not
-    # the tokenizer vocab, because the generation-side permutation is drawn
-    # over probs.shape[-1]; the detector permutation must match it exactly.
+
     vocab = list(range(CTX.vocab_size))
     rp = SIReweightProcessor(vocab=vocab)
     dp = SIDetectorProcessor(vocab=vocab)
@@ -1024,14 +977,13 @@ def stealthink_trial(prompt_ids, payload_int, n_tokens, trial_seed):
             # the same support as ArcMark/BiMark and the shared base
             # reference. Truncating AFTER the reweighting (e.g. via this
             # function's top_k argument) would re-distort the watermarked
-            # distribution, so it stays 0 here. (Deviation from the released
-            # script, which reweights the full-vocab distribution.)
+            # distribution, so it stays 0 here.
             logits_processor=LogitsProcessorList(
                 [TopKTruncationProcessor(TOP_K), lp]),
             n_new_tokens=n_tokens,
             do_sample=True,
             temperature=1.0,
-            top_k=0,             # must remain 0: see comment above
+            top_k=0,             
             eos_id=tokenizer.eos_token_id,
             soft_eos_penalty=0.0,
         )
@@ -1070,7 +1022,7 @@ def stealthink_trial(prompt_ids, payload_int, n_tokens, trial_seed):
 
 
 # ============================================================================
-# Metrics: bit-error rate, distinct-n  (steganalysis F1 removed)
+# Metrics: bit-error rate, distinct-n  
 # ============================================================================
 def bit_error_rate(decoded_idx: int, true_idx: int, k_bits: int = K_BITS) -> float:
     """Fraction of the k_bits payload bits that are wrong (Hamming / k_bits).
@@ -1132,7 +1084,7 @@ class TrialMetrics:
     """Accumulates the per-trial metrics shared by every scheme sweep."""
 
     def __init__(self):
-        self.rs = []                 # (ok, n_tokens[, ...])
+        self.rs = []                 
         self.ppl_wm = []
         self.ppl_base = []
         self.ber = []
