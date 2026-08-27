@@ -1,17 +1,15 @@
-torch>=2.4
-transformers>=4.53
-tokenizers>=0.21
-accelerate>=1.0
-datasets>=3.0
-huggingface-hub>=0.30
-safetensors>=0.4
-sentencepiece>=0.2
-numpy>=1.26,<2
-scipy>=1.11               
-pandas>=2.0
-matplotlib>=3.7
+torch>=2.6
+transformers>=5.14
+tokenizers>=0.22
+accelerate>=1.13
+datasets>=4.8
+huggingface-hub>=1.25
+safetensors>=0.8
+numpy>=2.0,<3
+scipy>=1.17
+pandas>=3.0
+matplotlib>=3.10
 chess>=1.11
-POT>=0.9.3                
+POT>=0.9.6                
+protobuf>=5.0             
 
-# Optional (eval_pipeline.py hosted judge only):
-# google-genai>=1.9
