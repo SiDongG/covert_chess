@@ -313,7 +313,6 @@ class WatermarkLogitsProcessor(WatermarkBase, LogitsProcessor):
         self.rng = torch.Generator(device=input_ids.device) if self.rng is None else self.rng
         feedback_bias = self.feedback_args.get("feedback_bias", -1)
 
-        #TODO: batchify ecc with feedback
         list_of_greenlist_ids = [None for _ in input_ids]  # Greenlists could differ in length
         list_of_blacklist_ids = [[] for _ in input_ids]
         feedback_flag = False
@@ -1065,8 +1064,7 @@ class WatermarkDetector(WatermarkBase):
             z_score = score_dict.get("z_score", optimal_z)
             score_dict.update(dict(p_value=self._compute_p_value(z_score)))
 
-        # Return per-token results for mask. This is still the same, just scored by windows
-        # todo would be to mark the actually counted tokens differently
+        # Return per-token results for mask. 
         if return_green_token_mask:
             score_dict.update(dict(green_token_mask=green_mask.tolist()))
 

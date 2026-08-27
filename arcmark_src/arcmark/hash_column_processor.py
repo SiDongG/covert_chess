@@ -9,7 +9,6 @@ At each position t:
     symbol_t     = m_vec · g_t  mod p
     target_angle = 2π · symbol_t / p  +  2π · s_index / r
 
-The side-info shift s_index is computed exactly as before — unchanged.
 """
 
 from __future__ import annotations
@@ -111,7 +110,7 @@ class HashColumnLogitsProcessor(LogitsProcessor):
         g_t    = hash_to_vector(self.seed, context_tokens, self._d, self.p)
         symbol = int(np.dot(self._m_vec, g_t.astype(np.int64)) % self.p)
 
-        # ── Compute side-info key (unchanged) ─────────────────────────────
+        # ── Compute side-info key  ─────────────────────────────
         s_index, perm_seed = compute_key_si(
             secret_key=self.seed,
             context_tokens=context_tokens,

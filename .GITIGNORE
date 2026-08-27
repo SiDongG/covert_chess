@@ -1,0 +1,51 @@
+# ── macOS ────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ── Python bytecode / caches ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Packaging / build ────────────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ── Virtual environments ─────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env
+
+# ── Notebooks ────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Editors / IDEs ───────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+
+# ── Hugging Face / model weights (kept out of the repo) ──────────────────
+# hf_cache/
+# models/
+# *.safetensors
+
+# ── Generated experiment outputs ─────────────────────────────────────────
+# Shipped reference results live in data/ and are intentionally tracked.
+# Uncomment to keep freshly generated run outputs from being re-committed:
+# covert_chess/*.png
+# covert_chess/*.csv
+# covert_chess/transcripts_*.json
+# covert_chess/blinded_pairs.jsonl
+# covert_chess/answer_key.jsonl
+# covert_chess/judge_results.jsonl

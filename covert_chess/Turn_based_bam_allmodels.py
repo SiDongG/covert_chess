@@ -87,7 +87,7 @@ N_PRINT_TRANSCRIPTS = 2
 OUT_PLOT = "turnbased_bam_matrix.png"
 OUT_CSV  = "turnbased_bam_matrix.csv"
 
-# ── ArcMark core knobs (unchanged) ──────────────────────────────────────────
+# ── ArcMark core knobs ──────────────────────────────────────────
 P_FIELD            = 4
 R_RESOLUTION       = 4
 SHARED_SEED        = 0x9E3779B97F4A7C15F39CC0605CEDC834  # 128-bit (lambda=128); matches compare.py
@@ -501,7 +501,7 @@ def read_symbol_angle(token_id, key_context):
 
 
 # ============================================================================
-# BAM posterior machinery — robust LAPLACE  (unchanged math; M is now passed in)
+# BAM posterior machinery — robust LAPLACE  
 # ============================================================================
 P_SYM      = P_FIELD
 _SIGMA     = math.pi / P_SYM

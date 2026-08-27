@@ -56,7 +56,6 @@ from torch import Tensor
 # ── Side-info module import ───────────────────────────────────────────────
 # keygen.py now delegates to side_info.py for all key derivation.
 # The original compute_key / compute_keys_from_tokens signatures are
-# preserved as thin wrappers so existing code continues to work unchanged.
 from arcmark.side_info import (
     SideInfoMode,
     compute_key_si,

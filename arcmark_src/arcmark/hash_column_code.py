@@ -21,7 +21,7 @@ where m_vec(m) is the base-p representation of message index m
 2. The codebook is secret (depends on secret_key) and context-dependent
 3. After a back-translation attack, drift in g_t is limited to exactly
    context_width positions per changed token — same as side-info drift
-4. The side-info shift s_index is orthogonal and unchanged
+4. The side-info shift s_index is orthogonal 
 5. Compatible with the standard minimum-distance decoder via
    score_all_messages — but requires the context-aware codebook to be
    passed in rather than the fixed one

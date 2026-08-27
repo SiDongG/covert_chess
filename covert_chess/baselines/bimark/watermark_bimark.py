@@ -1,7 +1,6 @@
 # Vendored verbatim from WatermarkBimark.py of the official BiMark
 # implementation: https://github.com/Kx-Feng/BiMark
-# Only changes: package-relative prf import; removed the per-call
-# "time cost" print (timing is handled by the harness).
+
 from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor
 import torch
 from typing import Dict, List, Union

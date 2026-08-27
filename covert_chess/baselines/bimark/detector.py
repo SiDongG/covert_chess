@@ -5,7 +5,7 @@
 #    same class; Python keeps the second definition (fixed partition_seeds,
 #    matching the generator). We vendor that operative second definition and
 #    drop the shadowed first one.
-#  * Debug prints removed; imports made package-relative. Logic unchanged.
+#  * Debug prints removed; imports made package-relative. 
 import copy
 import random
 from math import sqrt

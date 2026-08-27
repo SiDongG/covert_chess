@@ -95,14 +95,6 @@ class SideInfoMode(str, Enum):
 
 def _secret_key_bytes(secret_key: int) -> bytes:
     """Encode the shared secret as a 16-byte (128-bit) little-endian block.
-
-    The previous implementation used ``struct.pack("<q", secret_key)``, a
-    *signed 64-bit* container. That capped the effective seed entropy at
-    64 bits (and raised for any value that did not fit in an int64), so the
-    realized key schedule could never reach the 128-bit security parameter
-    (lambda = 128) claimed in the paper. Encoding to 16 bytes lets the full
-    128-bit seed flow into the SHA-256 input, so ``s_index``, ``perm_seed``,
-    and ``R_t`` are all derived from the complete seed.
     """
     if secret_key < 0:
         # Preserve two's-complement-style round-tripping for any legacy

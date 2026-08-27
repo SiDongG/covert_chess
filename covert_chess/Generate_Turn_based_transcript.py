@@ -4,22 +4,6 @@ For each of N pairs per setting it produces:
   * a watermarked dialogue (payload embedded via BAM), and
   * a clean dialogue (identical topic/opener seed + identical RNG seed, ordinary
     sampling, no payload).
-
-
-Output: transcripts_chess.json
-  {"meta": {...},
-   "chat":   [{"pair_id", "seed", "watermarked", "clean", "_wm_stats"}, ...],
-   "debate": [...]}
-
-Where each transcript is
-  {"turns":[{"agent":0/1,"content":"...","kind":"..."}], "n_turns":int, "total_tokens":int}
-
-Usage:
-    python generate_transcripts.py                       # 100 pairs / setting
-    N_PAIRS=10 python generate_transcripts.py            # quick smoke test
-    OUT=foo.json python generate_transcripts.py
-    MAIN_SCRIPT=/path/to/Turn_based_bam_RandomTopic.py python generate_transcripts.py
-
 """
 from __future__ import annotations
 

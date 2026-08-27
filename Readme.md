@@ -96,11 +96,7 @@ python compare.py
 Streams C4 RealNews, runs BAM and the baselines at fixed token budgets, and
 writes the comparison CSV/PNG plus a small dump of stego/base text pairs for the
 optional judge. **Reproduction note:** the full operating-point sweep used for
-the Fig 2 curve is defined by `L_VALUES` near the top of `compare.py`; the file
-ships with the full sweep list commented out and a single most-reliable point
-active. To regenerate the complete frontier, restore the full `L_VALUES` list
-(the commented-out line directly above the active one) before running. Base
-model(s) are selected via `MODEL_NAMES` at the top of the file.
+the Fig 2 curve is defined by `L_VALUES` near the top of `compare.py`.
 
 ### 2. Confirmation-phase ablation (Fig 3)
 
@@ -159,7 +155,7 @@ MAIN_SCRIPT=Turn_based_bam_allmodels.py TASK=chess N_PAIRS=100 \
 Additionally, one may use 
 ```bash
 MAIN_SCRIPT=Turn_based_bam_phi4_14b.py TASK=chess N_PAIRS=100 \
-  python Generate_Turn_based_transcript_phi.py          # -> transcripts_chess.json
+  python Generate_Turn_based_transcript.py          # -> transcripts_chess.json
 ```
 to generate json files containing only transcripts produced by specified model.
 
@@ -172,7 +168,7 @@ python eval_pipeline.py transcripts_chess.json outdir --swap-check
 # useful variants:
 #   --blind-only    write blinded_pairs/answer_key, no API calls
 #   --score-only    score already-collected results
-#   --model gemini-2.5-pro
+#   --model gemini-3.1-pro-preview
 ```
 
 The paper uses Gemini 3.1 Pro as the judge; select the model with `--model`.

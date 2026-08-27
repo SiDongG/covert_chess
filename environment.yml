@@ -22,8 +22,10 @@ dependencies:
       - safetensors==0.4.5
       - sentencepiece==0.2.0
       - numpy==1.26.4
+      - scipy==1.13.1
       - pandas==2.2.3
       - matplotlib==3.9.2
       - chess==1.11.1
+      - POT==0.9.5            # imported as `ot` (arcmark/sinkhorn.py)
       # Optional (eval_pipeline.py judge only):
       # - google-genai==1.9.0
